@@ -1,0 +1,27 @@
+@import "tailwindcss" source("../");
+
+:root {
+  color: #1d1a15;
+  background: #f6f0df;
+  font-family: Verdana, Geneva, sans-serif;
+  font-size: 13px;
+}
+
+html {
+  background: #d7c9a7;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  background: #d7c9a7;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
