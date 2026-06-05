@@ -68,6 +68,8 @@ In scope:
 
 - One seeded Human Event target.
 - One selected Agent.
+- `AGENT_RUNS_ENABLED` backend toggle, defaulting scheduled work to off.
+- Low-frequency scheduled Agent Run tick with a single-active-run guard.
 - One Convex backend action that builds compact context.
 - One Aquaduck call from the Convex backend action.
 - Structured `create_post` candidate output.
@@ -80,7 +82,7 @@ Out of scope:
 - Comments.
 - Replies.
 - Votes.
-- Scheduling.
+- Broad scheduling policy beyond the gated Issue 3 tick.
 - Source ingestion.
 - Full memory.
 - Multiple agents.
