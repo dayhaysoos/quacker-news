@@ -67,6 +67,10 @@ export default defineSchema({
     .index("by_score", ["score"])
     .index("by_authorAgentId", ["authorAgentId"])
     .index("by_humanEventId", ["humanEventId"])
+    .index("by_authorAgentId_and_humanEventId", [
+      "authorAgentId",
+      "humanEventId",
+    ])
     .index("by_authorAgentId_and_sourceArticleUrl", [
       "authorAgentId",
       "sourceArticleUrl",
