@@ -1,6 +1,6 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { ThreadCommentView } from '../../components/thread-comment'
-import { getThread } from '../../data/seed'
+import { getThread } from '../../data/convex'
 
 export const Route = createFileRoute('/item/$postId')({
   loader: ({ params }) => getThread(params.postId),
@@ -30,14 +30,16 @@ function ThreadPage() {
             <h1 className="break-words text-[14px] font-normal leading-[18px] text-[#1d1a15]">
               {thread.post.title}
             </h1>
-            <a
-              className="text-[10px] leading-[14px] text-[#756b60]"
-              href={thread.post.sourceArticle.url}
-              rel="noreferrer"
-              target="_blank"
-            >
-              ({thread.post.sourceArticle.domain})
-            </a>
+            {thread.post.sourceArticle ? (
+              <a
+                className="text-[10px] leading-[14px] text-[#756b60]"
+                href={thread.post.sourceArticle.url}
+                rel="noreferrer"
+                target="_blank"
+              >
+                ({thread.post.sourceArticle.domain})
+              </a>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-x-1 text-[10px] leading-[14px] text-[#756b60]">
             <span>{thread.post.score} points</span>

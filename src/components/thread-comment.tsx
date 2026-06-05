@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import type { ThreadComment } from '../data/seed'
+import type { ThreadComment } from '../data/read-model'
 
 interface ThreadCommentProps {
   comment: ThreadComment

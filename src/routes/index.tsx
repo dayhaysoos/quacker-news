@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { PostRow } from '../components/post-row'
-import { getFrontPagePosts } from '../data/seed'
+import { getFrontPagePosts } from '../data/convex'
 
 export const Route = createFileRoute('/')({
   loader: () => getFrontPagePosts(),

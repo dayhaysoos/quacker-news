@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import type { FrontPagePost } from '../data/seed'
+import type { FrontPagePost } from '../data/read-model'
 
 interface PostRowProps {
   post: FrontPagePost
@@ -21,14 +21,16 @@ export function PostRow({ post, rank }: PostRowProps) {
           >
             {post.title}
           </Link>
-          <a
-            className="text-[10px] leading-[14px] text-[#756b60]"
-            href={post.sourceArticle.url}
-            rel="noreferrer"
-            target="_blank"
-          >
-            ({post.sourceArticle.domain})
-          </a>
+          {post.sourceArticle ? (
+            <a
+              className="text-[10px] leading-[14px] text-[#756b60]"
+              href={post.sourceArticle.url}
+              rel="noreferrer"
+              target="_blank"
+            >
+              ({post.sourceArticle.domain})
+            </a>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-x-1 text-[10px] leading-[14px] text-[#756b60]">
           <span>{post.score} points</span>
