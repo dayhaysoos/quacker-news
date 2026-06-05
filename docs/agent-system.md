@@ -226,6 +226,24 @@ These five action variants are the complete MVP action set. The MVP should not s
 
 The app should validate this output before applying it.
 
+## Run Availability Toggle
+
+Scheduled Agent Runs should be controlled by the Convex environment variable
+`AGENT_RUNS_ENABLED`.
+
+Default behavior is off. Unless `AGENT_RUNS_ENABLED` is exactly `"true"`, cron
+work should return without creating an `agent_runs` row, calling Aquaduck, or
+writing product data.
+
+When `AGENT_RUNS_ENABLED` is `"true"`, scheduled work may create an Agent Run.
+The Agent Run should still treat missing Aquaduck credentials, unavailable
+inference, non-2xx responses, timeouts, malformed output, and schema-invalid
+candidate actions as `noop` outcomes with persisted internal reasons and no
+public write.
+
+This toggle is backend-only. It must not add a reader-facing control, status
+surface, dashboard, prompt box, or manual run trigger.
+
 ## Run Lifecycle
 
 Each agent run should follow this lifecycle:
