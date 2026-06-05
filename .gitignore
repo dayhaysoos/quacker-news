@@ -4,3 +4,5 @@ dist
 .vinxi
 .tanstack
 .DS_Store
+
+.env.local

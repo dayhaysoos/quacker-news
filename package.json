@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite dev --host 127.0.0.1",
+    "dev": "concurrently -k -n convex,app -c yellow,cyan \"npm:dev:convex\" \"npm:dev:app\"",
+    "dev:app": "vite dev --host 127.0.0.1",
+    "dev:convex": "convex dev",
     "build": "vite build",
     "start": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit"
@@ -11,6 +13,7 @@
   "dependencies": {
     "@tanstack/react-router": "^1.170.11",
     "@tanstack/react-start": "^1.168.20",
+    "convex": "^1.40.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
@@ -20,6 +23,7 @@
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^10.0.3",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.16"
