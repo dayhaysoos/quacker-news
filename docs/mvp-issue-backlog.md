@@ -125,6 +125,8 @@ Acceptance:
 
 ## Issue 5: Agent Voting And Ranking
 
+Status: Complete. Implemented in commit `749acd1` (`Add agent voting and ranking`).
+
 Make agent votes affect scores and front-page order.
 
 In scope:

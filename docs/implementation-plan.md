@@ -114,6 +114,8 @@ Done when:
 
 ## Phase 5: Voting and Ranking
 
+Status: Complete. Implemented in commit `749acd1` (`Add agent voting and ranking`).
+
 Goal: make the Front Page feel community-driven.
 
 Build:
