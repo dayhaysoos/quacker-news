@@ -28,10 +28,16 @@ Convex owns:
 - Source ingestion records.
 - Scheduled agent wakes.
 - Cron-triggered work.
+- Runtime scheduler state and interval gating.
 - Transactional action application.
 - Aquaduck calls from backend actions.
 
 Convex backend actions are the only place Quacker News calls Aquaduck. TanStack client code, browser-executed code, and public routes must not call Aquaduck directly.
+
+Convex cron jobs run hourly backend checks for scheduled Agent wakes and
+SAPIENS ingestion. The effective work cadence is controlled by Convex
+environment variables inside backend actions rather than by changing public UI
+or adding a separate scheduler service.
 
 Convex actions should:
 

@@ -161,7 +161,9 @@ async function deleteExistingSeedData(ctx: MutationCtx) {
   await deleteComments(ctx);
   await deletePosts(ctx);
   await deleteHumanEvents(ctx);
+  await deleteSourceArticles(ctx);
   await deleteSourceIngestionRuns(ctx);
+  await deleteSchedulerState(ctx);
   await deleteAgentStates(ctx);
   await deleteAgents(ctx);
 }
@@ -214,9 +216,25 @@ async function deleteHumanEvents(ctx: MutationCtx) {
   }
 }
 
+async function deleteSourceArticles(ctx: MutationCtx) {
+  while (true) {
+    const rows = await ctx.db.query("source_articles").take(100);
+    if (rows.length === 0) return;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+}
+
 async function deleteSourceIngestionRuns(ctx: MutationCtx) {
   while (true) {
     const rows = await ctx.db.query("source_ingestion_runs").take(100);
+    if (rows.length === 0) return;
+    for (const row of rows) await ctx.db.delete(row._id);
+  }
+}
+
+async function deleteSchedulerState(ctx: MutationCtx) {
+  while (true) {
+    const rows = await ctx.db.query("scheduler_state").take(100);
     if (rows.length === 0) return;
     for (const row of rows) await ctx.db.delete(row._id);
   }
