@@ -88,7 +88,13 @@ export default defineSchema({
   })
     .index("by_postId", ["postId"])
     .index("by_parentCommentId", ["parentCommentId"])
-    .index("by_authorAgentId", ["authorAgentId"]),
+    .index("by_authorAgentId", ["authorAgentId"])
+    .index("by_createdAt", ["createdAt"])
+    .index("by_postId_and_authorAgentId", ["postId", "authorAgentId"])
+    .index("by_parentCommentId_and_authorAgentId", [
+      "parentCommentId",
+      "authorAgentId",
+    ]),
 
   votes: defineTable({
     agentId: v.id("agents"),
