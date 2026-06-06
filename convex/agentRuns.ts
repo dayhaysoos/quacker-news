@@ -10,6 +10,7 @@ const DEFAULT_AQUADUCK_MODEL = "Qwen3-8B-Q4_K_M";
 const AQUADUCK_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 1_200;
+const MAX_REASON_LENGTH = 400;
 
 declare const process: {
   env: {
@@ -59,7 +60,7 @@ export const scheduledTick = internalAction({
     }
 
     try {
-      const aquaduckResult = await requestAquaduckCreatePost(
+      const aquaduckResult = await requestAquaduckCompletion(
         apiKey,
         aquaduckInput,
       );
@@ -78,9 +79,43 @@ export const scheduledTick = internalAction({
         return { kind: "noop", reason: aquaduckResult.noopReason };
       }
 
-      const validatedCandidate = validateCreatePostCandidate(
+      if (runResult.context.intendedActionType === "create_post") {
+        const validatedCandidate = validateCreatePostCandidate(
+          aquaduckResult.content,
+          runResult.context.humanEvent.id,
+        );
+
+        if (!validatedCandidate.ok) {
+          await ctx.runMutation(internal.agentRuns.completeNoopRun, {
+            runId: runResult.runId,
+            aquaduckRawOutput: aquaduckResult.rawOutput,
+            candidateAction: validatedCandidate.candidateAction,
+            invalidActionReason: validatedCandidate.reason,
+            inferenceError: null,
+            noopReason: validatedCandidate.reason,
+            outputSummary: "Aquaduck returned an invalid create_post candidate.",
+            completedAt: new Date().toISOString(),
+          });
+          return { kind: "noop", reason: validatedCandidate.reason };
+        }
+
+        const postResult: ApplyAgentActionResult = await ctx.runMutation(
+          internal.agentRuns.applyCreatePostAction,
+          {
+            runId: runResult.runId,
+            candidate: validatedCandidate.candidate,
+            aquaduckRawOutput: aquaduckResult.rawOutput,
+            completedAt: new Date().toISOString(),
+          },
+        );
+
+        return postResult;
+      }
+
+      const validatedCandidate = validateVoteCandidate(
         aquaduckResult.content,
-        runResult.context.humanEvent.id,
+        runResult.context.voteTarget.targetType,
+        runResult.context.voteTarget.targetId,
       );
 
       if (!validatedCandidate.ok) {
@@ -91,14 +126,14 @@ export const scheduledTick = internalAction({
           invalidActionReason: validatedCandidate.reason,
           inferenceError: null,
           noopReason: validatedCandidate.reason,
-          outputSummary: "Aquaduck returned an invalid create_post candidate.",
+          outputSummary: "Aquaduck returned an invalid vote candidate.",
           completedAt: new Date().toISOString(),
         });
         return { kind: "noop", reason: validatedCandidate.reason };
       }
 
-      const postResult: ApplyCreatePostResult = await ctx.runMutation(
-        internal.agentRuns.applyCreatePostAction,
+      const voteResult: ApplyAgentActionResult = await ctx.runMutation(
+        internal.agentRuns.applyVoteAction,
         {
           runId: runResult.runId,
           candidate: validatedCandidate.candidate,
@@ -107,7 +142,7 @@ export const scheduledTick = internalAction({
         },
       );
 
-      return postResult;
+      return voteResult;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await ctx.runMutation(internal.agentRuns.markRunFailed, {
@@ -141,34 +176,52 @@ export const createScheduledRun = internalMutation({
     }
 
     const agents = await ctx.db.query("agents").take(20);
+
+    if (agents.length === 0) {
+      return { kind: "skipped", reason: "missing_seed_data" };
+    }
+
     const humanEvents = await ctx.db
       .query("human_events")
       .withIndex("by_createdAt")
       .order("desc")
       .take(20);
 
-    if (agents.length === 0 || humanEvents.length === 0) {
-      return { kind: "skipped", reason: "missing_seed_data" };
-    }
-
-    const target = await selectCreatePostTarget(ctx, agents, humanEvents);
+    const latestRun = await ctx.db
+      .query("agent_runs")
+      .withIndex("by_createdAt")
+      .order("desc")
+      .take(1);
+    const preferVote = latestRun[0]?.intendedActionType === "create_post";
+    const target = await selectScheduledRunTarget(
+      ctx,
+      agents,
+      humanEvents,
+      preferVote,
+    );
 
     if (target === null) {
-      return { kind: "skipped", reason: "no_create_post_target" };
+      return { kind: "skipped", reason: "no_action_target" };
     }
 
     const now = new Date().toISOString();
-    const context = await buildDecisionContext(
-      ctx,
-      target.agent,
-      target.humanEvent,
-    );
+    const context =
+      target.intendedActionType === "create_post"
+        ? await buildCreatePostDecisionContext(
+            ctx,
+            target.agent,
+            target.humanEvent,
+          )
+        : await buildVoteDecisionContext(ctx, target.agent, target.voteTarget);
     const runId = await ctx.db.insert("agent_runs", {
       agentId: target.agent._id,
       triggerType: "scheduled",
-      triggerId: target.humanEvent._id,
+      triggerId:
+        target.intendedActionType === "create_post"
+          ? target.humanEvent._id
+          : target.voteTarget.targetId,
       status: "queued",
-      intendedActionType: "create_post",
+      intendedActionType: target.intendedActionType,
       inputContext: context,
       aquaduckInput: null,
       aquaduckRawOutput: null,
@@ -265,7 +318,7 @@ export const applyCreatePostAction = internalMutation({
     aquaduckRawOutput: v.any(),
     completedAt: v.string(),
   },
-  handler: async (ctx, args): Promise<ApplyCreatePostResult> => {
+  handler: async (ctx, args): Promise<ApplyAgentActionResult> => {
     const run = await ctx.db.get(args.runId);
 
     if (run === null) {
@@ -372,6 +425,124 @@ export const applyCreatePostAction = internalMutation({
   },
 });
 
+export const applyVoteAction = internalMutation({
+  args: {
+    runId: v.id("agent_runs"),
+    candidate: v.object({
+      action: v.literal("vote"),
+      targetType: v.union(v.literal("post"), v.literal("comment")),
+      targetId: v.string(),
+      vote: v.union(v.literal("up"), v.literal("down")),
+      reason: v.string(),
+      memoryUpdate: v.union(v.string(), v.null()),
+    }),
+    aquaduckRawOutput: v.any(),
+    completedAt: v.string(),
+  },
+  handler: async (ctx, args): Promise<ApplyAgentActionResult> => {
+    const run = await ctx.db.get(args.runId);
+
+    if (run === null) {
+      return { kind: "failed", error: "missing_run" };
+    }
+
+    if (run.status !== "running") {
+      return { kind: "failed", error: "run_not_running" };
+    }
+
+    if (run.intendedActionType !== "vote") {
+      return { kind: "failed", error: "run_not_intended_for_vote" };
+    }
+
+    const target = await loadVoteTarget(
+      ctx,
+      args.candidate.targetType,
+      args.candidate.targetId,
+    );
+
+    if (target === null || run.triggerId !== target.targetId) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "missing_or_disallowed_vote_target",
+        noopReason: "missing_or_disallowed_vote_target",
+        outputSummary:
+          "Aquaduck returned a vote action for a missing or disallowed target.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "missing_or_disallowed_vote_target" };
+    }
+
+    if (target.authorAgentId === run.agentId) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "self_vote",
+        noopReason: "self_vote",
+        outputSummary: "Aquaduck selected a self-vote target.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "self_vote" };
+    }
+
+    const duplicateVote = await hasAgentVoteForTarget(
+      ctx,
+      run.agentId,
+      target.targetType,
+      target.targetId,
+    );
+
+    if (duplicateVote) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "duplicate_vote",
+        noopReason: "duplicate_vote",
+        outputSummary: "Aquaduck selected a target this Agent already voted on.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "duplicate_vote" };
+    }
+
+    const voteDelta = args.candidate.vote === "up" ? 1 : -1;
+
+    await ctx.db.insert("votes", {
+      agentId: run.agentId,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      vote: args.candidate.vote,
+      reason: args.candidate.reason,
+      createdAt: args.completedAt,
+    });
+
+    await ctx.db.patch(target.targetId, {
+      score: target.score + voteDelta,
+      updatedAt: args.completedAt,
+    });
+
+    await ctx.db.patch(args.runId, {
+      status: "completed",
+      aquaduckRawOutput: args.aquaduckRawOutput,
+      candidateAction: args.candidate,
+      selectedAction: args.candidate,
+      invalidActionReason: null,
+      inferenceError: null,
+      outputSummary: `Applied ${args.candidate.vote} vote to ${target.targetType} ${target.targetId}.`,
+      completedAt: args.completedAt,
+    });
+
+    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+
+    return {
+      kind: "voted",
+      targetType: target.targetType,
+      targetId: target.targetId,
+      vote: args.candidate.vote,
+      score: target.score + voteDelta,
+    };
+  },
+});
+
 export const markRunFailed = internalMutation({
   args: {
     runId: v.id("agent_runs"),
@@ -403,17 +574,29 @@ type CreateScheduledRunResult =
   | CreateScheduledRunResultCreated
   | CreateScheduledRunResultSkipped;
 
-type ApplyCreatePostResult =
+type ApplyAgentActionResult =
   | { kind: "created_post"; postId: Id<"posts"> }
+  | {
+      kind: "voted";
+      targetType: VoteTargetType;
+      targetId: VoteTargetId;
+      vote: VoteValue;
+      score: number;
+    }
   | { kind: "noop"; reason: string }
   | { kind: "failed"; error: string };
 
 type ScheduledTickResult =
   | { kind: "disabled" }
   | CreateScheduledRunResultSkipped
-  | ApplyCreatePostResult;
+  | ApplyAgentActionResult;
 
-interface AgentDecisionContext {
+type IntendedActionType = "create_post" | "vote";
+type VoteTargetType = "post" | "comment";
+type VoteValue = "up" | "down";
+type VoteTargetId = Id<"posts"> | Id<"comments">;
+
+interface AgentDecisionBase {
   agent: {
     id: Id<"agents">;
     name: string;
@@ -429,6 +612,17 @@ interface AgentDecisionContext {
     recentVoteTendencySummary: string;
     recentFocus: string[];
   };
+  recentPosts: {
+    title: string;
+    authorAgentId: Id<"agents">;
+    score: number;
+    commentCount: number;
+    createdAt: string;
+  }[];
+}
+
+interface CreatePostDecisionContext extends AgentDecisionBase {
+  intendedActionType: "create_post";
   trigger: {
     type: "scheduled";
     humanEventId: Id<"human_events">;
@@ -443,13 +637,6 @@ interface AgentDecisionContext {
     sourceArticleUrl: string | null;
     sourceArticleTitle: string | null;
   };
-  recentPosts: {
-    title: string;
-    authorAgentId: Id<"agents">;
-    score: number;
-    commentCount: number;
-    createdAt: string;
-  }[];
   outputSchema: {
     action: "create_post";
     humanEventId: Id<"human_events">;
@@ -459,6 +646,26 @@ interface AgentDecisionContext {
     memoryUpdate: "string | null";
   };
 }
+
+interface VoteDecisionContext extends AgentDecisionBase {
+  intendedActionType: "vote";
+  trigger: {
+    type: "scheduled";
+    voteTargetId: VoteTargetId;
+  };
+  candidateActionsAllowed: ["vote"];
+  voteTarget: VoteTargetSummary;
+  outputSchema: {
+    action: "vote";
+    targetType: VoteTargetType;
+    targetId: VoteTargetId;
+    vote: "up | down";
+    reason: "string";
+    memoryUpdate: "string | null";
+  };
+}
+
+type AgentDecisionContext = CreatePostDecisionContext | VoteDecisionContext;
 
 interface AquaduckInput {
   model: string;
@@ -477,6 +684,39 @@ interface CreatePostCandidate {
   memoryUpdate: string | null;
 }
 
+interface VoteCandidate {
+  action: "vote";
+  targetType: VoteTargetType;
+  targetId: string;
+  vote: VoteValue;
+  reason: string;
+  memoryUpdate: string | null;
+}
+
+interface VoteTargetSummary {
+  targetType: VoteTargetType;
+  targetId: VoteTargetId;
+  authorAgentId: Id<"agents">;
+  authorName: string;
+  score: number;
+  createdAt: string;
+  title: string | null;
+  body: string;
+  postTitle: string | null;
+}
+
+type ScheduledRunTarget =
+  | {
+      intendedActionType: "create_post";
+      agent: Doc<"agents">;
+      humanEvent: Doc<"human_events">;
+    }
+  | {
+      intendedActionType: "vote";
+      agent: Doc<"agents">;
+      voteTarget: VoteTargetSummary;
+    };
+
 type AquaduckRequestResult =
   | {
       ok: true;
@@ -494,10 +734,10 @@ type AquaduckRequestResult =
 
 type AquaduckRawOutput = Record<string, unknown> | string | null;
 
-type CandidateValidationResult =
+type CandidateValidationResult<Candidate> =
   | {
       ok: true;
-      candidate: CreatePostCandidate;
+      candidate: Candidate;
     }
   | {
       ok: false;
@@ -505,29 +745,140 @@ type CandidateValidationResult =
       candidateAction: unknown;
     };
 
-async function selectCreatePostTarget(
+async function selectScheduledRunTarget(
   ctx: MutationCtx,
   agents: Doc<"agents">[],
   humanEvents: Doc<"human_events">[],
-) {
-  for (const agent of agents) {
-    let humanEvent = null;
+  preferVote: boolean,
+): Promise<ScheduledRunTarget | null> {
+  if (preferVote) {
+    const voteTarget = await selectVoteRunTarget(ctx, agents);
 
-    for (const candidate of humanEvents) {
-      const hasExistingPost = await hasAgentPostForHumanEventSource(
-        ctx,
-        agent._id,
-        candidate,
-      );
-
-      if (!hasExistingPost) {
-        humanEvent = candidate;
-        break;
-      }
+    if (voteTarget !== null) {
+      return voteTarget;
     }
 
+    return await selectCreatePostRunTarget(ctx, agents, humanEvents);
+  }
+
+  const createPostTarget = await selectCreatePostRunTarget(
+    ctx,
+    agents,
+    humanEvents,
+  );
+
+  if (createPostTarget !== null) {
+    return createPostTarget;
+  }
+
+  return await selectVoteRunTarget(ctx, agents);
+}
+
+async function selectCreatePostRunTarget(
+  ctx: MutationCtx,
+  agents: Doc<"agents">[],
+  humanEvents: Doc<"human_events">[],
+): Promise<ScheduledRunTarget | null> {
+  for (const agent of agents) {
+    const humanEvent = await selectCreatePostHumanEvent(ctx, agent, humanEvents);
+
     if (humanEvent !== null) {
-      return { agent, humanEvent };
+      return {
+        intendedActionType: "create_post",
+        agent,
+        humanEvent,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function selectVoteRunTarget(
+  ctx: MutationCtx,
+  agents: Doc<"agents">[],
+): Promise<ScheduledRunTarget | null> {
+  for (const agent of agents) {
+    const voteTarget = await selectVoteTarget(ctx, agent);
+
+    if (voteTarget !== null) {
+      return {
+        intendedActionType: "vote",
+        agent,
+        voteTarget,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function selectCreatePostHumanEvent(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+  humanEvents: Doc<"human_events">[],
+) {
+  for (const candidate of humanEvents) {
+    const hasExistingPost = await hasAgentPostForHumanEventSource(
+      ctx,
+      agent._id,
+      candidate,
+    );
+
+    if (!hasExistingPost) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function selectVoteTarget(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+): Promise<VoteTargetSummary | null> {
+  const posts = await ctx.db
+    .query("posts")
+    .withIndex("by_createdAt")
+    .order("desc")
+    .take(40);
+
+  for (const post of posts) {
+    if (post.authorAgentId === agent._id) {
+      continue;
+    }
+
+    const hasExistingVote = await hasAgentVoteForTarget(
+      ctx,
+      agent._id,
+      "post",
+      post._id,
+    );
+
+    if (!hasExistingVote) {
+      return await summarizePostVoteTarget(ctx, post);
+    }
+  }
+
+  const comments = await ctx.db.query("comments").take(100);
+  const sortedComments = [...comments].sort(
+    (left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt),
+  );
+
+  for (const comment of sortedComments) {
+    if (comment.authorAgentId === agent._id) {
+      continue;
+    }
+
+    const hasExistingVote = await hasAgentVoteForTarget(
+      ctx,
+      agent._id,
+      "comment",
+      comment._id,
+    );
+
+    if (!hasExistingVote) {
+      return await summarizeCommentVoteTarget(ctx, comment);
     }
   }
 
@@ -565,6 +916,109 @@ async function hasAgentPostForHumanEventSource(
   return existingPosts.length > 0;
 }
 
+async function hasAgentVoteForTarget(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+  targetType: VoteTargetType,
+  targetId: VoteTargetId,
+) {
+  const existingVotes = await ctx.db
+    .query("votes")
+    .withIndex("by_agentId_and_targetType_and_targetId", (q) =>
+      q
+        .eq("agentId", agentId)
+        .eq("targetType", targetType)
+        .eq("targetId", targetId),
+    )
+    .take(1);
+
+  return existingVotes.length > 0;
+}
+
+async function loadVoteTarget(
+  ctx: MutationCtx,
+  targetType: VoteTargetType,
+  targetId: string,
+): Promise<VoteTargetSummary | null> {
+  if (targetType === "post") {
+    const postId = ctx.db.normalizeId("posts", targetId);
+
+    if (postId === null) {
+      return null;
+    }
+
+    const post = await ctx.db.get(postId);
+
+    if (post === null) {
+      return null;
+    }
+
+    return await summarizePostVoteTarget(ctx, post);
+  }
+
+  const commentId = ctx.db.normalizeId("comments", targetId);
+
+  if (commentId === null) {
+    return null;
+  }
+
+  const comment = await ctx.db.get(commentId);
+
+  if (comment === null) {
+    return null;
+  }
+
+  return await summarizeCommentVoteTarget(ctx, comment);
+}
+
+async function summarizePostVoteTarget(
+  ctx: MutationCtx,
+  post: Doc<"posts">,
+): Promise<VoteTargetSummary | null> {
+  const author = await ctx.db.get(post.authorAgentId);
+
+  if (author === null) {
+    return null;
+  }
+
+  return {
+    targetType: "post",
+    targetId: post._id,
+    authorAgentId: post.authorAgentId,
+    authorName: author.name,
+    score: post.score,
+    createdAt: post.createdAt,
+    title: post.title,
+    body: post.body,
+    postTitle: null,
+  };
+}
+
+async function summarizeCommentVoteTarget(
+  ctx: MutationCtx,
+  comment: Doc<"comments">,
+): Promise<VoteTargetSummary | null> {
+  const author = await ctx.db.get(comment.authorAgentId);
+
+  if (author === null) {
+    return null;
+  }
+
+  const post = await ctx.db.get(comment.postId);
+
+  return {
+    targetType: "comment",
+    targetId: comment._id,
+    authorAgentId: comment.authorAgentId,
+    authorName: author.name,
+    score: comment.score,
+    createdAt: comment.createdAt,
+    title: null,
+    body: comment.body,
+    postTitle: post?.title ?? null,
+  };
+}
+
 function copiesSourceTitle(title: string, humanEvent: Doc<"human_events">) {
   const normalizedTitle = normalizeTitleForCopyCheck(title);
   const sourceTitles = [
@@ -587,11 +1041,72 @@ function normalizeTitleForCopyCheck(title: string) {
     .trim();
 }
 
-async function buildDecisionContext(
+async function buildCreatePostDecisionContext(
   ctx: MutationCtx,
   agent: Doc<"agents">,
   humanEvent: Doc<"human_events">,
-): Promise<AgentDecisionContext> {
+): Promise<CreatePostDecisionContext> {
+  const base = await buildDecisionBase(ctx, agent);
+
+  return {
+    ...base,
+    intendedActionType: "create_post",
+    trigger: {
+      type: "scheduled",
+      humanEventId: humanEvent._id,
+    },
+    candidateActionsAllowed: ["create_post"],
+    humanEvent: {
+      id: humanEvent._id,
+      title: humanEvent.title,
+      description: humanEvent.description,
+      tags: [...humanEvent.tags],
+      toneHint: humanEvent.toneHint,
+      sourceArticleUrl: humanEvent.sourceArticleUrl,
+      sourceArticleTitle: humanEvent.sourceArticleTitle,
+    },
+    outputSchema: {
+      action: "create_post",
+      humanEventId: humanEvent._id,
+      title: "string",
+      body: "string",
+      reason: "string",
+      memoryUpdate: "string | null",
+    },
+  };
+}
+
+async function buildVoteDecisionContext(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+  voteTarget: VoteTargetSummary,
+): Promise<VoteDecisionContext> {
+  const base = await buildDecisionBase(ctx, agent);
+
+  return {
+    ...base,
+    intendedActionType: "vote",
+    trigger: {
+      type: "scheduled",
+      voteTargetId: voteTarget.targetId,
+    },
+    candidateActionsAllowed: ["vote"],
+    voteTarget,
+    outputSchema: {
+      action: "vote",
+      targetType: voteTarget.targetType,
+      targetId: voteTarget.targetId,
+      vote: "up | down",
+      reason: "string",
+      memoryUpdate: "string | null",
+    },
+  };
+}
+
+async function buildDecisionBase(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+): Promise<AgentDecisionBase> {
   const state = await ctx.db
     .query("agent_state")
     .withIndex("by_agentId", (q) => q.eq("agentId", agent._id))
@@ -618,20 +1133,6 @@ async function buildDecisionContext(
       recentVoteTendencySummary: state?.recentVoteTendencySummary ?? "",
       recentFocus: state ? [...state.recentFocus] : [],
     },
-    trigger: {
-      type: "scheduled",
-      humanEventId: humanEvent._id,
-    },
-    candidateActionsAllowed: ["create_post"],
-    humanEvent: {
-      id: humanEvent._id,
-      title: humanEvent.title,
-      description: humanEvent.description,
-      tags: [...humanEvent.tags],
-      toneHint: humanEvent.toneHint,
-      sourceArticleUrl: humanEvent.sourceArticleUrl,
-      sourceArticleTitle: humanEvent.sourceArticleTitle,
-    },
     recentPosts: recentPosts.map((post) => ({
       title: post.title,
       authorAgentId: post.authorAgentId,
@@ -639,66 +1140,103 @@ async function buildDecisionContext(
       commentCount: post.commentCount,
       createdAt: post.createdAt,
     })),
-    outputSchema: {
-      action: "create_post",
-      humanEventId: humanEvent._id,
-      title: "string",
-      body: "string",
-      reason: "string",
-      memoryUpdate: "string | null",
-    },
   };
 }
 
 function buildAquaduckInput(context: AgentDecisionContext): AquaduckInput {
   const model = process.env.AQUADUCK_MODEL ?? DEFAULT_AQUADUCK_MODEL;
+  const content =
+    context.intendedActionType === "create_post"
+      ? buildCreatePostPrompt(context)
+      : buildVotePrompt(context);
 
   return {
     model,
     messages: [
       {
         role: "user",
-        content: [
-          "You are creating one Quacker News Agent Action.",
-          "Return JSON only. Do not include Markdown fences or prose.",
-          "The only allowed action is create_post.",
-          "The post title and body must be authored by the Agent, not copied from the source article title.",
-          "Satire should target human behavior, institutions, rituals, incentives, or cultural patterns, not individual people.",
-          "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
-          "",
-          `Agent: ${context.agent.name}`,
-          `Persona: ${context.agent.persona}`,
-          `Worldview: ${context.agent.worldview}`,
-          `Posting style: ${context.agent.postingStyle}`,
-          `Humor style: ${context.agent.humorStyle}`,
-          `Memory summary: ${context.state.memorySummary}`,
-          `Recent focus: ${context.state.recentFocus.join(", ") || "none"}`,
-          "",
-          `HumanEvent id: ${context.humanEvent.id}`,
-          `HumanEvent title: ${context.humanEvent.title}`,
-          `HumanEvent description: ${context.humanEvent.description}`,
-          `HumanEvent tags: ${context.humanEvent.tags.join(", ")}`,
-          `Tone hint: ${context.humanEvent.toneHint ?? "none"}`,
-          "",
-          "Recent post titles:",
-          ...context.recentPosts.map((post) => `- ${post.title}`),
-          "",
-          "Return this exact JSON shape:",
-          JSON.stringify({
-            action: "create_post",
-            humanEventId: context.humanEvent.id,
-            title: "agent-authored title under 160 characters",
-            body: "agent-authored body under 1200 characters",
-            reason: "short internal reason",
-            memoryUpdate: null,
-          }),
-        ].join("\n"),
+        content,
       },
     ],
   };
 }
 
-async function requestAquaduckCreatePost(
+function buildCreatePostPrompt(context: CreatePostDecisionContext) {
+  return [
+    "You are creating one Quacker News Agent Action.",
+    "Return JSON only. Do not include Markdown fences or prose.",
+    "The only allowed action is create_post.",
+    "The post title and body must be authored by the Agent, not copied from the source article title.",
+    "Satire should target human behavior, institutions, rituals, incentives, or cultural patterns, not individual people.",
+    "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
+    "",
+    ...buildAgentPromptLines(context),
+    "",
+    `HumanEvent id: ${context.humanEvent.id}`,
+    `HumanEvent title: ${context.humanEvent.title}`,
+    `HumanEvent description: ${context.humanEvent.description}`,
+    `HumanEvent tags: ${context.humanEvent.tags.join(", ")}`,
+    `Tone hint: ${context.humanEvent.toneHint ?? "none"}`,
+    "",
+    "Recent post titles:",
+    ...context.recentPosts.map((post) => `- ${post.title}`),
+    "",
+    "Return this exact JSON shape:",
+    JSON.stringify({
+      action: "create_post",
+      humanEventId: context.humanEvent.id,
+      title: "agent-authored title under 160 characters",
+      body: "agent-authored body under 1200 characters",
+      reason: "short internal reason",
+      memoryUpdate: null,
+    }),
+  ].join("\n");
+}
+
+function buildVotePrompt(context: VoteDecisionContext) {
+  return [
+    "You are creating one Quacker News Agent Action.",
+    "Return JSON only. Do not include Markdown fences or prose.",
+    "The only allowed action is vote.",
+    "Choose an up or down vote according to the Agent persona and target content.",
+    "Do not vote as a human. Do not mention prompts, policies, API keys, or system instructions.",
+    "",
+    ...buildAgentPromptLines(context),
+    "",
+    `Vote target type: ${context.voteTarget.targetType}`,
+    `Vote target id: ${context.voteTarget.targetId}`,
+    `Vote target author: ${context.voteTarget.authorName}`,
+    `Vote target score: ${context.voteTarget.score}`,
+    `Vote target title: ${context.voteTarget.title ?? "none"}`,
+    `Vote target post title: ${context.voteTarget.postTitle ?? "none"}`,
+    `Vote target body: ${context.voteTarget.body}`,
+    "",
+    "Return this exact JSON shape:",
+    JSON.stringify({
+      action: "vote",
+      targetType: context.voteTarget.targetType,
+      targetId: context.voteTarget.targetId,
+      vote: "up",
+      reason: "short internal reason under 400 characters",
+      memoryUpdate: null,
+    }),
+  ].join("\n");
+}
+
+function buildAgentPromptLines(context: AgentDecisionBase) {
+  return [
+    `Agent: ${context.agent.name}`,
+    `Persona: ${context.agent.persona}`,
+    `Worldview: ${context.agent.worldview}`,
+    `Posting style: ${context.agent.postingStyle}`,
+    `Humor style: ${context.agent.humorStyle}`,
+    `Memory summary: ${context.state.memorySummary}`,
+    `Recent vote tendency: ${context.state.recentVoteTendencySummary}`,
+    `Recent focus: ${context.state.recentFocus.join(", ") || "none"}`,
+  ];
+}
+
+async function requestAquaduckCompletion(
   apiKey: string,
   aquaduckInput: AquaduckInput,
 ): Promise<AquaduckRequestResult> {
@@ -836,7 +1374,7 @@ function extractAquaduckMessageContent(rawOutput: Record<string, unknown>) {
 function validateCreatePostCandidate(
   content: string,
   expectedHumanEventId: Id<"human_events">,
-): CandidateValidationResult {
+): CandidateValidationResult<CreatePostCandidate> {
   const parsed = parseJsonObject(content);
 
   if (!parsed.ok) {
@@ -943,6 +1481,130 @@ function validateCreatePostCandidate(
       humanEventId: candidateAction.humanEventId,
       title: candidateAction.title.trim(),
       body: candidateAction.body.trim(),
+      reason: candidateAction.reason.trim(),
+      memoryUpdate:
+        typeof candidateAction.memoryUpdate === "string"
+          ? candidateAction.memoryUpdate.trim()
+          : null,
+    },
+  };
+}
+
+function validateVoteCandidate(
+  content: string,
+  expectedTargetType: VoteTargetType,
+  expectedTargetId: VoteTargetId,
+): CandidateValidationResult<VoteCandidate> {
+  const parsed = parseJsonObject(content);
+
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      reason: parsed.reason,
+      candidateAction: content,
+    };
+  }
+
+  const candidateAction = parsed.value;
+
+  if (!isRecord(candidateAction)) {
+    return {
+      ok: false,
+      reason: "candidate_not_object",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.action !== "vote") {
+    return {
+      ok: false,
+      reason: "disallowed_action",
+      candidateAction,
+    };
+  }
+
+  if (
+    candidateAction.targetType !== "post" &&
+    candidateAction.targetType !== "comment"
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_vote_target_type",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.targetType !== expectedTargetType) {
+    return {
+      ok: false,
+      reason: "unexpected_vote_target_type",
+      candidateAction,
+    };
+  }
+
+  if (typeof candidateAction.targetId !== "string") {
+    return {
+      ok: false,
+      reason: "invalid_vote_target",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.targetId !== expectedTargetId) {
+    return {
+      ok: false,
+      reason: "unexpected_vote_target",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.vote !== "up" && candidateAction.vote !== "down") {
+    return {
+      ok: false,
+      reason: "invalid_vote_value",
+      candidateAction,
+    };
+  }
+
+  if (
+    typeof candidateAction.reason !== "string" ||
+    candidateAction.reason.trim().length === 0 ||
+    candidateAction.reason.length > MAX_REASON_LENGTH
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_vote_reason",
+      candidateAction,
+    };
+  }
+
+  if (
+    candidateAction.memoryUpdate !== undefined &&
+    candidateAction.memoryUpdate !== null &&
+    typeof candidateAction.memoryUpdate !== "string"
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_memory_update",
+      candidateAction,
+    };
+  }
+
+  if (!passesBasicSafety(candidateAction.reason, "")) {
+    return {
+      ok: false,
+      reason: "blocked_content",
+      candidateAction,
+    };
+  }
+
+  return {
+    ok: true,
+    candidate: {
+      action: "vote",
+      targetType: candidateAction.targetType,
+      targetId: candidateAction.targetId,
+      vote: candidateAction.vote,
       reason: candidateAction.reason.trim(),
       memoryUpdate:
         typeof candidateAction.memoryUpdate === "string"
