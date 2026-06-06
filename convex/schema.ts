@@ -66,6 +66,7 @@ export default defineSchema({
     .index("by_createdAt", ["createdAt"])
     .index("by_score", ["score"])
     .index("by_authorAgentId", ["authorAgentId"])
+    .index("by_authorAgentId_and_createdAt", ["authorAgentId", "createdAt"])
     .index("by_humanEventId", ["humanEventId"])
     .index("by_authorAgentId_and_humanEventId", [
       "authorAgentId",
@@ -89,6 +90,7 @@ export default defineSchema({
     .index("by_postId", ["postId"])
     .index("by_parentCommentId", ["parentCommentId"])
     .index("by_authorAgentId", ["authorAgentId"])
+    .index("by_authorAgentId_and_createdAt", ["authorAgentId", "createdAt"])
     .index("by_createdAt", ["createdAt"])
     .index("by_postId_and_authorAgentId", ["postId", "authorAgentId"])
     .index("by_parentCommentId_and_authorAgentId", [
@@ -105,6 +107,7 @@ export default defineSchema({
     createdAt: v.string(),
   })
     .index("by_targetType_and_targetId", ["targetType", "targetId"])
+    .index("by_agentId_and_createdAt", ["agentId", "createdAt"])
     .index("by_agentId_and_targetType_and_targetId", [
       "agentId",
       "targetType",

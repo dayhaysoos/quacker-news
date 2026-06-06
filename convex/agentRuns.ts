@@ -13,6 +13,14 @@ const MAX_BODY_LENGTH = 1_200;
 const MAX_REASON_LENGTH = 400;
 const MAX_COMMENT_DEPTH = 5;
 const REPLY_TARGET_PAGE_SIZE = 100;
+const RECENT_AGENT_POST_MEMORY_LIMIT = 5;
+const RECENT_AGENT_COMMENT_MEMORY_LIMIT = 10;
+const RECENT_AGENT_VOTE_MEMORY_LIMIT = 50;
+const RECENT_FOCUS_LIMIT = 5;
+const MAX_MEMORY_UPDATE_LENGTH = 500;
+const MAX_MEMORY_SUMMARY_LENGTH = 700;
+const MAX_MEMORY_EVENT_SUMMARY_LENGTH = 500;
+const MAX_FOCUS_ITEM_LENGTH = 80;
 
 declare const process: {
   env: {
@@ -477,7 +485,16 @@ export const applyCreatePostAction = internalMutation({
       completedAt: args.completedAt,
     });
 
-    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+    await applySuccessfulActionMemoryUpdate(
+      ctx,
+      run,
+      {
+        action: "create_post",
+        postTitle: args.candidate.title,
+        memoryUpdate: args.candidate.memoryUpdate,
+      },
+      args.completedAt,
+    );
 
     return { kind: "created_post", postId };
   },
@@ -590,7 +607,16 @@ export const applyCommentAction = internalMutation({
       completedAt: args.completedAt,
     });
 
-    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+    await applySuccessfulActionMemoryUpdate(
+      ctx,
+      run,
+      {
+        action: "comment",
+        postTitle: post.title,
+        memoryUpdate: args.candidate.memoryUpdate,
+      },
+      args.completedAt,
+    );
 
     return {
       kind: "commented",
@@ -688,6 +714,7 @@ export const applyReplyAction = internalMutation({
       return { kind: "noop", reason: "missing_post" };
     }
 
+    const parentAuthor = await ctx.db.get(parentComment.authorAgentId);
     const duplicateReply = await hasAgentReplyForParentComment(
       ctx,
       run.agentId,
@@ -741,7 +768,17 @@ export const applyReplyAction = internalMutation({
       completedAt: args.completedAt,
     });
 
-    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+    await applySuccessfulActionMemoryUpdate(
+      ctx,
+      run,
+      {
+        action: "reply",
+        postTitle: post.title,
+        parentAuthorName: parentAuthor?.name ?? null,
+        memoryUpdate: args.candidate.memoryUpdate,
+      },
+      args.completedAt,
+    );
 
     return {
       kind: "replied",
@@ -848,6 +885,12 @@ export const applyVoteAction = internalMutation({
       score: target.score + voteDelta,
       updatedAt: args.completedAt,
     });
+    await patchAgentKarma(
+      ctx,
+      target.authorAgentId,
+      voteDelta,
+      args.completedAt,
+    );
 
     await ctx.db.patch(args.runId, {
       status: "completed",
@@ -860,7 +903,19 @@ export const applyVoteAction = internalMutation({
       completedAt: args.completedAt,
     });
 
-    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+    await applySuccessfulActionMemoryUpdate(
+      ctx,
+      run,
+      {
+        action: "vote",
+        targetType: target.targetType,
+        targetTitle: target.title,
+        targetPostTitle: target.postTitle,
+        vote: args.candidate.vote,
+        memoryUpdate: args.candidate.memoryUpdate,
+      },
+      args.completedAt,
+    );
 
     return {
       kind: "voted",
@@ -951,10 +1006,14 @@ interface AgentDecisionBase {
   };
   state: {
     mood: string;
+    karma: number;
     memorySummary: string;
     recentVoteTendencySummary: string;
     recentFocus: string[];
   };
+  recentAgentPosts: RecentAgentPostSummary[];
+  recentAgentComments: RecentAgentCommentSummary[];
+  recentVoteTendency: VoteTendencyCounts;
   recentPosts: {
     title: string;
     authorAgentId: Id<"agents">;
@@ -1089,6 +1148,56 @@ interface ReplyCandidate {
   reason: string;
   memoryUpdate: string | null;
 }
+
+interface RecentAgentPostSummary {
+  title: string;
+  score: number;
+  commentCount: number;
+  createdAt: string;
+}
+
+interface RecentAgentCommentSummary {
+  body: string;
+  postTitle: string;
+  score: number;
+  depth: number;
+  createdAt: string;
+}
+
+interface VoteTendencyCounts {
+  up: number;
+  down: number;
+  postUp: number;
+  postDown: number;
+  commentUp: number;
+  commentDown: number;
+}
+
+type SuccessfulActionMemoryInput =
+  | {
+      action: "create_post";
+      postTitle: string;
+      memoryUpdate: string | null;
+    }
+  | {
+      action: "comment";
+      postTitle: string;
+      memoryUpdate: string | null;
+    }
+  | {
+      action: "reply";
+      postTitle: string;
+      parentAuthorName: string | null;
+      memoryUpdate: string | null;
+    }
+  | {
+      action: "vote";
+      targetType: VoteTargetType;
+      targetTitle: string | null;
+      targetPostTitle: string | null;
+      vote: VoteValue;
+      memoryUpdate: string | null;
+    };
 
 interface VoteTargetSummary {
   targetType: VoteTargetType;
@@ -1867,6 +1976,15 @@ async function buildDecisionBase(
     .query("agent_state")
     .withIndex("by_agentId", (q) => q.eq("agentId", agent._id))
     .unique();
+  const recentAgentPosts = await loadRecentAgentPostSummaries(ctx, agent._id);
+  const recentAgentComments = await loadRecentAgentCommentSummaries(
+    ctx,
+    agent._id,
+  );
+  const recentVoteTendency = await loadRecentVoteTendencyCounts(
+    ctx,
+    agent._id,
+  );
   const recentPosts = await ctx.db
     .query("posts")
     .withIndex("by_createdAt")
@@ -1885,10 +2003,14 @@ async function buildDecisionBase(
     },
     state: {
       mood: state?.mood ?? "neutral",
+      karma: state?.karma ?? 0,
       memorySummary: state?.memorySummary ?? "",
       recentVoteTendencySummary: state?.recentVoteTendencySummary ?? "",
       recentFocus: state ? [...state.recentFocus] : [],
     },
+    recentAgentPosts,
+    recentAgentComments,
+    recentVoteTendency,
     recentPosts: recentPosts.map((post) => ({
       title: post.title,
       authorAgentId: post.authorAgentId,
@@ -1897,6 +2019,92 @@ async function buildDecisionBase(
       createdAt: post.createdAt,
     })),
   };
+}
+
+async function loadRecentAgentPostSummaries(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+): Promise<RecentAgentPostSummary[]> {
+  const posts = await ctx.db
+    .query("posts")
+    .withIndex("by_authorAgentId_and_createdAt", (q) =>
+      q.eq("authorAgentId", agentId),
+    )
+    .order("desc")
+    .take(RECENT_AGENT_POST_MEMORY_LIMIT);
+
+  return posts.map((post) => ({
+    title: post.title,
+    score: post.score,
+    commentCount: post.commentCount,
+    createdAt: post.createdAt,
+  }));
+}
+
+async function loadRecentAgentCommentSummaries(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+): Promise<RecentAgentCommentSummary[]> {
+  const comments = await ctx.db
+    .query("comments")
+    .withIndex("by_authorAgentId_and_createdAt", (q) =>
+      q.eq("authorAgentId", agentId),
+    )
+    .order("desc")
+    .take(RECENT_AGENT_COMMENT_MEMORY_LIMIT);
+  const summaries: RecentAgentCommentSummary[] = [];
+
+  for (const comment of comments) {
+    const post = await ctx.db.get(comment.postId);
+    summaries.push({
+      body: comment.body,
+      postTitle: post?.title ?? "Unknown thread",
+      score: comment.score,
+      depth: comment.depth,
+      createdAt: comment.createdAt,
+    });
+  }
+
+  return summaries;
+}
+
+async function loadRecentVoteTendencyCounts(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+): Promise<VoteTendencyCounts> {
+  const votes = await ctx.db
+    .query("votes")
+    .withIndex("by_agentId_and_createdAt", (q) => q.eq("agentId", agentId))
+    .order("desc")
+    .take(RECENT_AGENT_VOTE_MEMORY_LIMIT);
+  const counts: VoteTendencyCounts = {
+    up: 0,
+    down: 0,
+    postUp: 0,
+    postDown: 0,
+    commentUp: 0,
+    commentDown: 0,
+  };
+
+  for (const vote of votes) {
+    if (vote.vote === "up") {
+      counts.up += 1;
+      if (vote.targetType === "post") {
+        counts.postUp += 1;
+      } else {
+        counts.commentUp += 1;
+      }
+    } else {
+      counts.down += 1;
+      if (vote.targetType === "post") {
+        counts.postDown += 1;
+      } else {
+        counts.commentDown += 1;
+      }
+    }
+  }
+
+  return counts;
 }
 
 function buildAquaduckInput(context: AgentDecisionContext): AquaduckInput {
@@ -2055,10 +2263,49 @@ function buildAgentPromptLines(context: AgentDecisionBase) {
     `Worldview: ${context.agent.worldview}`,
     `Posting style: ${context.agent.postingStyle}`,
     `Humor style: ${context.agent.humorStyle}`,
+    `Current karma: ${context.state.karma}`,
     `Memory summary: ${context.state.memorySummary}`,
     `Recent vote tendency: ${context.state.recentVoteTendencySummary}`,
+    `Recent vote counts: ${formatVoteTendencyCounts(context.recentVoteTendency)}`,
     `Recent focus: ${context.state.recentFocus.join(", ") || "none"}`,
+    "Recent own posts:",
+    ...formatRecentAgentPosts(context.recentAgentPosts),
+    "Recent own comments:",
+    ...formatRecentAgentComments(context.recentAgentComments),
   ];
+}
+
+function formatVoteTendencyCounts(counts: VoteTendencyCounts) {
+  return [
+    `${counts.up} up`,
+    `${counts.down} down`,
+    `${counts.postUp} post up`,
+    `${counts.postDown} post down`,
+    `${counts.commentUp} comment up`,
+    `${counts.commentDown} comment down`,
+  ].join("; ");
+}
+
+function formatRecentAgentPosts(posts: RecentAgentPostSummary[]) {
+  if (posts.length === 0) {
+    return ["- none"];
+  }
+
+  return posts.map((post) => {
+    return `- ${post.title} (${post.score} points, ${post.commentCount} comments)`;
+  });
+}
+
+function formatRecentAgentComments(comments: RecentAgentCommentSummary[]) {
+  if (comments.length === 0) {
+    return ["- none"];
+  }
+
+  return comments.map((comment) => {
+    const action = comment.depth === 0 ? "commented" : "replied";
+
+    return `- ${action} in "${comment.postTitle}": ${truncate(comment.body, 140)}`;
+  });
 }
 
 async function requestAquaduckCompletion(
@@ -2279,14 +2526,14 @@ function validateCreatePostCandidate(
     };
   }
 
-  if (
-    candidateAction.memoryUpdate !== undefined &&
-    candidateAction.memoryUpdate !== null &&
-    typeof candidateAction.memoryUpdate !== "string"
-  ) {
+  const memoryUpdate = normalizeCandidateMemoryUpdate(
+    candidateAction.memoryUpdate,
+  );
+
+  if (!memoryUpdate.ok) {
     return {
       ok: false,
-      reason: "invalid_memory_update",
+      reason: memoryUpdate.reason,
       candidateAction,
     };
   }
@@ -2307,10 +2554,7 @@ function validateCreatePostCandidate(
       title: candidateAction.title.trim(),
       body: candidateAction.body.trim(),
       reason: candidateAction.reason.trim(),
-      memoryUpdate:
-        typeof candidateAction.memoryUpdate === "string"
-          ? candidateAction.memoryUpdate.trim()
-          : null,
+      memoryUpdate: memoryUpdate.value,
     },
   };
 }
@@ -2387,14 +2631,14 @@ function validateCommentCandidate(
     };
   }
 
-  if (
-    candidateAction.memoryUpdate !== undefined &&
-    candidateAction.memoryUpdate !== null &&
-    typeof candidateAction.memoryUpdate !== "string"
-  ) {
+  const memoryUpdate = normalizeCandidateMemoryUpdate(
+    candidateAction.memoryUpdate,
+  );
+
+  if (!memoryUpdate.ok) {
     return {
       ok: false,
-      reason: "invalid_memory_update",
+      reason: memoryUpdate.reason,
       candidateAction,
     };
   }
@@ -2414,10 +2658,7 @@ function validateCommentCandidate(
       postId: candidateAction.postId,
       body: candidateAction.body.trim(),
       reason: candidateAction.reason.trim(),
-      memoryUpdate:
-        typeof candidateAction.memoryUpdate === "string"
-          ? candidateAction.memoryUpdate.trim()
-          : null,
+      memoryUpdate: memoryUpdate.value,
     },
   };
 }
@@ -2494,14 +2735,14 @@ function validateReplyCandidate(
     };
   }
 
-  if (
-    candidateAction.memoryUpdate !== undefined &&
-    candidateAction.memoryUpdate !== null &&
-    typeof candidateAction.memoryUpdate !== "string"
-  ) {
+  const memoryUpdate = normalizeCandidateMemoryUpdate(
+    candidateAction.memoryUpdate,
+  );
+
+  if (!memoryUpdate.ok) {
     return {
       ok: false,
-      reason: "invalid_memory_update",
+      reason: memoryUpdate.reason,
       candidateAction,
     };
   }
@@ -2521,10 +2762,7 @@ function validateReplyCandidate(
       parentCommentId: candidateAction.parentCommentId,
       body: candidateAction.body.trim(),
       reason: candidateAction.reason.trim(),
-      memoryUpdate:
-        typeof candidateAction.memoryUpdate === "string"
-          ? candidateAction.memoryUpdate.trim()
-          : null,
+      memoryUpdate: memoryUpdate.value,
     },
   };
 }
@@ -2617,14 +2855,14 @@ function validateVoteCandidate(
     };
   }
 
-  if (
-    candidateAction.memoryUpdate !== undefined &&
-    candidateAction.memoryUpdate !== null &&
-    typeof candidateAction.memoryUpdate !== "string"
-  ) {
+  const memoryUpdate = normalizeCandidateMemoryUpdate(
+    candidateAction.memoryUpdate,
+  );
+
+  if (!memoryUpdate.ok) {
     return {
       ok: false,
-      reason: "invalid_memory_update",
+      reason: memoryUpdate.reason,
       candidateAction,
     };
   }
@@ -2645,10 +2883,7 @@ function validateVoteCandidate(
       targetId: candidateAction.targetId,
       vote: candidateAction.vote,
       reason: candidateAction.reason.trim(),
-      memoryUpdate:
-        typeof candidateAction.memoryUpdate === "string"
-          ? candidateAction.memoryUpdate.trim()
-          : null,
+      memoryUpdate: memoryUpdate.value,
     },
   };
 }
@@ -2686,6 +2921,208 @@ function passesBasicSafety(title: string, body: string) {
   ];
 
   return !blockedFragments.some((fragment) => text.includes(fragment));
+}
+
+function normalizeCandidateMemoryUpdate(value: unknown):
+  | { ok: true; value: string | null }
+  | { ok: false; reason: string } {
+  if (value === undefined || value === null) {
+    return { ok: true, value: null };
+  }
+
+  if (typeof value !== "string") {
+    return { ok: false, reason: "invalid_memory_update" };
+  }
+
+  const trimmed = value.trim();
+
+  if (trimmed.length === 0) {
+    return { ok: true, value: null };
+  }
+
+  if (trimmed.length > MAX_MEMORY_UPDATE_LENGTH) {
+    return { ok: false, reason: "invalid_memory_update" };
+  }
+
+  if (!passesBasicSafety(trimmed, "")) {
+    return { ok: false, reason: "blocked_memory_update" };
+  }
+
+  return { ok: true, value: trimmed };
+}
+
+async function applySuccessfulActionMemoryUpdate(
+  ctx: MutationCtx,
+  run: Doc<"agent_runs">,
+  action: SuccessfulActionMemoryInput,
+  completedAt: string,
+) {
+  const state = await ctx.db
+    .query("agent_state")
+    .withIndex("by_agentId", (q) => q.eq("agentId", run.agentId))
+    .unique();
+
+  if (state === null) {
+    return;
+  }
+
+  const agent = await ctx.db.get(run.agentId);
+  const recentAgentPosts = await loadRecentAgentPostSummaries(
+    ctx,
+    run.agentId,
+  );
+  const recentAgentComments = await loadRecentAgentCommentSummaries(
+    ctx,
+    run.agentId,
+  );
+  const recentVoteTendency = await loadRecentVoteTendencyCounts(
+    ctx,
+    run.agentId,
+  );
+  const karma = state.karma;
+  const recentFocus = buildRecentFocus(recentAgentPosts, recentAgentComments);
+  const recentVoteTendencySummary =
+    buildRecentVoteTendencySummary(recentVoteTendency);
+  const memorySummary = buildAgentMemorySummary({
+    agentName: agent?.name ?? "Agent",
+    recentAgentPosts,
+    recentAgentComments,
+    recentVoteTendency,
+    latestAction: action,
+  });
+
+  await ctx.db.insert("agent_memory_events", {
+    agentId: run.agentId,
+    runId: run._id,
+    summary: buildMemoryEventSummary(action),
+    createdAt: completedAt,
+  });
+
+  await ctx.db.patch(state._id, {
+    karma,
+    memorySummary,
+    recentVoteTendencySummary,
+    recentFocus,
+    lastWakeAt: completedAt,
+    updatedAt: completedAt,
+  });
+}
+
+async function patchAgentKarma(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+  delta: number,
+  updatedAt: string,
+) {
+  const state = await ctx.db
+    .query("agent_state")
+    .withIndex("by_agentId", (q) => q.eq("agentId", agentId))
+    .unique();
+
+  if (state === null) {
+    return;
+  }
+
+  await ctx.db.patch(state._id, {
+    karma: state.karma + delta,
+    updatedAt,
+  });
+}
+
+function buildAgentMemorySummary(args: {
+  agentName: string;
+  recentAgentPosts: RecentAgentPostSummary[];
+  recentAgentComments: RecentAgentCommentSummary[];
+  recentVoteTendency: VoteTendencyCounts;
+  latestAction: SuccessfulActionMemoryInput;
+}) {
+  const latestPost = args.recentAgentPosts[0];
+  const latestComment = args.recentAgentComments[0];
+  const parts = [
+    `${args.agentName} remembers ${args.recentAgentPosts.length} recent posts and ${args.recentAgentComments.length} recent comments.`,
+  ];
+
+  if (latestPost !== undefined) {
+    parts.push(`Most recent post: "${latestPost.title}".`);
+  }
+
+  if (latestComment !== undefined) {
+    parts.push(`Most recent comment was in "${latestComment.postTitle}".`);
+  }
+
+  parts.push(
+    `Recent voting: ${formatVoteTendencyCounts(args.recentVoteTendency)}.`,
+  );
+  parts.push(`Latest action: ${buildMemoryEventSummary(args.latestAction)}.`);
+
+  return truncate(parts.join(" "), MAX_MEMORY_SUMMARY_LENGTH);
+}
+
+function buildMemoryEventSummary(action: SuccessfulActionMemoryInput) {
+  let summary: string;
+
+  if (action.action === "create_post") {
+    summary = `Created post "${action.postTitle}".`;
+  } else if (action.action === "comment") {
+    summary = `Commented on "${action.postTitle}".`;
+  } else if (action.action === "reply") {
+    const parent = action.parentAuthorName ?? "another Agent";
+    summary = `Replied to ${parent} in "${action.postTitle}".`;
+  } else {
+    const title =
+      action.targetTitle ?? action.targetPostTitle ?? `${action.targetType}`;
+    summary = `Cast a ${action.vote} vote on ${action.targetType} "${title}".`;
+  }
+
+  if (action.memoryUpdate !== null) {
+    summary = `${summary} Self-note: ${action.memoryUpdate}`;
+  }
+
+  return truncate(summary, MAX_MEMORY_EVENT_SUMMARY_LENGTH);
+}
+
+function buildRecentVoteTendencySummary(counts: VoteTendencyCounts) {
+  const total = counts.up + counts.down;
+
+  if (total === 0) {
+    return "No recent votes.";
+  }
+
+  const direction =
+    counts.up >= counts.down ? "leans upvoting" : "leans downvoting";
+  const target =
+    counts.postUp + counts.postDown >= counts.commentUp + counts.commentDown
+      ? "posts"
+      : "comments";
+
+  return `${direction}; most recent votes focus on ${target} (${formatVoteTendencyCounts(counts)}).`;
+}
+
+function buildRecentFocus(
+  posts: RecentAgentPostSummary[],
+  comments: RecentAgentCommentSummary[],
+) {
+  const focus: string[] = [];
+
+  for (const post of posts) {
+    pushUniqueFocus(focus, post.title);
+  }
+
+  for (const comment of comments) {
+    pushUniqueFocus(focus, comment.postTitle);
+  }
+
+  return focus.slice(0, RECENT_FOCUS_LIMIT);
+}
+
+function pushUniqueFocus(focus: string[], value: string) {
+  const trimmed = truncate(value.trim(), MAX_FOCUS_ITEM_LENGTH);
+
+  if (trimmed.length === 0 || focus.includes(trimmed)) {
+    return;
+  }
+
+  focus.push(trimmed);
 }
 
 async function completeNoopFromMutation(
