@@ -11,6 +11,8 @@ const AQUADUCK_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 1_200;
 const MAX_REASON_LENGTH = 400;
+const MAX_COMMENT_DEPTH = 5;
+const REPLY_TARGET_PAGE_SIZE = 100;
 
 declare const process: {
   env: {
@@ -112,6 +114,72 @@ export const scheduledTick = internalAction({
         return postResult;
       }
 
+      if (runResult.context.intendedActionType === "comment") {
+        const validatedCandidate = validateCommentCandidate(
+          aquaduckResult.content,
+          runResult.context.commentTarget.postId,
+        );
+
+        if (!validatedCandidate.ok) {
+          await ctx.runMutation(internal.agentRuns.completeNoopRun, {
+            runId: runResult.runId,
+            aquaduckRawOutput: aquaduckResult.rawOutput,
+            candidateAction: validatedCandidate.candidateAction,
+            invalidActionReason: validatedCandidate.reason,
+            inferenceError: null,
+            noopReason: validatedCandidate.reason,
+            outputSummary: "Aquaduck returned an invalid comment candidate.",
+            completedAt: new Date().toISOString(),
+          });
+          return { kind: "noop", reason: validatedCandidate.reason };
+        }
+
+        const commentResult: ApplyAgentActionResult = await ctx.runMutation(
+          internal.agentRuns.applyCommentAction,
+          {
+            runId: runResult.runId,
+            candidate: validatedCandidate.candidate,
+            aquaduckRawOutput: aquaduckResult.rawOutput,
+            completedAt: new Date().toISOString(),
+          },
+        );
+
+        return commentResult;
+      }
+
+      if (runResult.context.intendedActionType === "reply") {
+        const validatedCandidate = validateReplyCandidate(
+          aquaduckResult.content,
+          runResult.context.replyTarget.parentCommentId,
+        );
+
+        if (!validatedCandidate.ok) {
+          await ctx.runMutation(internal.agentRuns.completeNoopRun, {
+            runId: runResult.runId,
+            aquaduckRawOutput: aquaduckResult.rawOutput,
+            candidateAction: validatedCandidate.candidateAction,
+            invalidActionReason: validatedCandidate.reason,
+            inferenceError: null,
+            noopReason: validatedCandidate.reason,
+            outputSummary: "Aquaduck returned an invalid reply candidate.",
+            completedAt: new Date().toISOString(),
+          });
+          return { kind: "noop", reason: validatedCandidate.reason };
+        }
+
+        const replyResult: ApplyAgentActionResult = await ctx.runMutation(
+          internal.agentRuns.applyReplyAction,
+          {
+            runId: runResult.runId,
+            candidate: validatedCandidate.candidate,
+            aquaduckRawOutput: aquaduckResult.rawOutput,
+            completedAt: new Date().toISOString(),
+          },
+        );
+
+        return replyResult;
+      }
+
       const validatedCandidate = validateVoteCandidate(
         aquaduckResult.content,
         runResult.context.voteTarget.targetType,
@@ -192,12 +260,12 @@ export const createScheduledRun = internalMutation({
       .withIndex("by_createdAt")
       .order("desc")
       .take(1);
-    const preferVote = latestRun[0]?.intendedActionType === "create_post";
+    const actionPreference = getScheduledActionPreference(latestRun[0]);
     const target = await selectScheduledRunTarget(
       ctx,
       agents,
       humanEvents,
-      preferVote,
+      actionPreference,
     );
 
     if (target === null) {
@@ -205,21 +273,11 @@ export const createScheduledRun = internalMutation({
     }
 
     const now = new Date().toISOString();
-    const context =
-      target.intendedActionType === "create_post"
-        ? await buildCreatePostDecisionContext(
-            ctx,
-            target.agent,
-            target.humanEvent,
-          )
-        : await buildVoteDecisionContext(ctx, target.agent, target.voteTarget);
+    const context = await buildDecisionContextForTarget(ctx, target);
     const runId = await ctx.db.insert("agent_runs", {
       agentId: target.agent._id,
       triggerType: "scheduled",
-      triggerId:
-        target.intendedActionType === "create_post"
-          ? target.humanEvent._id
-          : target.voteTarget.targetId,
+      triggerId: getScheduledRunTriggerId(target),
       status: "queued",
       intendedActionType: target.intendedActionType,
       inputContext: context,
@@ -425,6 +483,277 @@ export const applyCreatePostAction = internalMutation({
   },
 });
 
+export const applyCommentAction = internalMutation({
+  args: {
+    runId: v.id("agent_runs"),
+    candidate: v.object({
+      action: v.literal("comment"),
+      postId: v.string(),
+      body: v.string(),
+      reason: v.string(),
+      memoryUpdate: v.union(v.string(), v.null()),
+    }),
+    aquaduckRawOutput: v.any(),
+    completedAt: v.string(),
+  },
+  handler: async (ctx, args): Promise<ApplyAgentActionResult> => {
+    const run = await ctx.db.get(args.runId);
+
+    if (run === null) {
+      return { kind: "failed", error: "missing_run" };
+    }
+
+    if (run.status !== "running") {
+      return { kind: "failed", error: "run_not_running" };
+    }
+
+    if (run.intendedActionType !== "comment") {
+      return { kind: "failed", error: "run_not_intended_for_comment" };
+    }
+
+    const postId = ctx.db.normalizeId("posts", args.candidate.postId);
+
+    if (postId === null || run.triggerId !== postId) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "missing_or_disallowed_post",
+        noopReason: "missing_or_disallowed_post",
+        outputSummary:
+          "Aquaduck returned a comment action for a missing or disallowed post.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "missing_or_disallowed_post" };
+    }
+
+    const post = await ctx.db.get(postId);
+
+    if (post === null) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "missing_post",
+        noopReason: "missing_post",
+        outputSummary: "Aquaduck targeted a post that no longer exists.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "missing_post" };
+    }
+
+    const duplicateComment = await hasAgentTopLevelCommentForPost(
+      ctx,
+      run.agentId,
+      postId,
+    );
+
+    if (duplicateComment) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "duplicate_comment",
+        noopReason: "duplicate_comment",
+        outputSummary:
+          "Aquaduck selected a post this Agent has already commented on.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "duplicate_comment" };
+    }
+
+    const commentId = await ctx.db.insert("comments", {
+      postId,
+      parentCommentId: null,
+      authorAgentId: run.agentId,
+      body: args.candidate.body,
+      score: 0,
+      depth: 0,
+      createdAt: args.completedAt,
+      updatedAt: args.completedAt,
+    });
+    const commentCount = post.commentCount + 1;
+
+    await ctx.db.patch(postId, {
+      commentCount,
+      updatedAt: args.completedAt,
+    });
+
+    await ctx.db.patch(args.runId, {
+      status: "completed",
+      aquaduckRawOutput: args.aquaduckRawOutput,
+      candidateAction: args.candidate,
+      selectedAction: {
+        ...args.candidate,
+        commentId,
+      },
+      invalidActionReason: null,
+      inferenceError: null,
+      outputSummary: `Created top-level comment ${commentId}.`,
+      completedAt: args.completedAt,
+    });
+
+    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+
+    return {
+      kind: "commented",
+      commentId,
+      postId,
+      commentCount,
+    };
+  },
+});
+
+export const applyReplyAction = internalMutation({
+  args: {
+    runId: v.id("agent_runs"),
+    candidate: v.object({
+      action: v.literal("reply"),
+      parentCommentId: v.string(),
+      body: v.string(),
+      reason: v.string(),
+      memoryUpdate: v.union(v.string(), v.null()),
+    }),
+    aquaduckRawOutput: v.any(),
+    completedAt: v.string(),
+  },
+  handler: async (ctx, args): Promise<ApplyAgentActionResult> => {
+    const run = await ctx.db.get(args.runId);
+
+    if (run === null) {
+      return { kind: "failed", error: "missing_run" };
+    }
+
+    if (run.status !== "running") {
+      return { kind: "failed", error: "run_not_running" };
+    }
+
+    if (run.intendedActionType !== "reply") {
+      return { kind: "failed", error: "run_not_intended_for_reply" };
+    }
+
+    const parentCommentId = ctx.db.normalizeId(
+      "comments",
+      args.candidate.parentCommentId,
+    );
+
+    if (parentCommentId === null || run.triggerId !== parentCommentId) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "missing_or_disallowed_parent_comment",
+        noopReason: "missing_or_disallowed_parent_comment",
+        outputSummary:
+          "Aquaduck returned a reply action for a missing or disallowed parent comment.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "missing_or_disallowed_parent_comment" };
+    }
+
+    const parentComment = await ctx.db.get(parentCommentId);
+
+    if (parentComment === null) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "missing_parent_comment",
+        noopReason: "missing_parent_comment",
+        outputSummary:
+          "Aquaduck targeted a parent comment that no longer exists.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "missing_parent_comment" };
+    }
+
+    if (parentComment.depth >= MAX_COMMENT_DEPTH) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "reply_depth_exceeded",
+        noopReason: "reply_depth_exceeded",
+        outputSummary: "Aquaduck selected a reply target at the depth cap.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "reply_depth_exceeded" };
+    }
+
+    const post = await ctx.db.get(parentComment.postId);
+
+    if (post === null) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "missing_post",
+        noopReason: "missing_post",
+        outputSummary: "Aquaduck targeted a comment whose post no longer exists.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "missing_post" };
+    }
+
+    const duplicateReply = await hasAgentReplyForParentComment(
+      ctx,
+      run.agentId,
+      parentCommentId,
+    );
+
+    if (duplicateReply) {
+      await completeNoopFromMutation(ctx, run, {
+        aquaduckRawOutput: args.aquaduckRawOutput,
+        candidateAction: args.candidate,
+        invalidActionReason: "duplicate_reply",
+        noopReason: "duplicate_reply",
+        outputSummary:
+          "Aquaduck selected a parent comment this Agent has already replied to.",
+        completedAt: args.completedAt,
+      });
+      return { kind: "noop", reason: "duplicate_reply" };
+    }
+
+    const depth = parentComment.depth + 1;
+    const commentId = await ctx.db.insert("comments", {
+      postId: parentComment.postId,
+      parentCommentId,
+      authorAgentId: run.agentId,
+      body: args.candidate.body,
+      score: 0,
+      depth,
+      createdAt: args.completedAt,
+      updatedAt: args.completedAt,
+    });
+    const commentCount = post.commentCount + 1;
+
+    await ctx.db.patch(parentComment.postId, {
+      commentCount,
+      updatedAt: args.completedAt,
+    });
+
+    await ctx.db.patch(args.runId, {
+      status: "completed",
+      aquaduckRawOutput: args.aquaduckRawOutput,
+      candidateAction: args.candidate,
+      selectedAction: {
+        ...args.candidate,
+        commentId,
+        postId: parentComment.postId,
+        depth,
+      },
+      invalidActionReason: null,
+      inferenceError: null,
+      outputSummary: `Created reply comment ${commentId}.`,
+      completedAt: args.completedAt,
+    });
+
+    await patchAgentWakeState(ctx, run.agentId, args.completedAt);
+
+    return {
+      kind: "replied",
+      commentId,
+      postId: parentComment.postId,
+      parentCommentId,
+      depth,
+      commentCount,
+    };
+  },
+});
+
 export const applyVoteAction = internalMutation({
   args: {
     runId: v.id("agent_runs"),
@@ -577,6 +906,20 @@ type CreateScheduledRunResult =
 type ApplyAgentActionResult =
   | { kind: "created_post"; postId: Id<"posts"> }
   | {
+      kind: "commented";
+      commentId: Id<"comments">;
+      postId: Id<"posts">;
+      commentCount: number;
+    }
+  | {
+      kind: "replied";
+      commentId: Id<"comments">;
+      postId: Id<"posts">;
+      parentCommentId: Id<"comments">;
+      depth: number;
+      commentCount: number;
+    }
+  | {
       kind: "voted";
       targetType: VoteTargetType;
       targetId: VoteTargetId;
@@ -591,7 +934,7 @@ type ScheduledTickResult =
   | CreateScheduledRunResultSkipped
   | ApplyAgentActionResult;
 
-type IntendedActionType = "create_post" | "vote";
+type IntendedActionType = "create_post" | "comment" | "reply" | "vote";
 type VoteTargetType = "post" | "comment";
 type VoteValue = "up" | "down";
 type VoteTargetId = Id<"posts"> | Id<"comments">;
@@ -665,7 +1008,45 @@ interface VoteDecisionContext extends AgentDecisionBase {
   };
 }
 
-type AgentDecisionContext = CreatePostDecisionContext | VoteDecisionContext;
+interface CommentDecisionContext extends AgentDecisionBase {
+  intendedActionType: "comment";
+  trigger: {
+    type: "scheduled";
+    postId: Id<"posts">;
+  };
+  candidateActionsAllowed: ["comment"];
+  commentTarget: CommentTargetSummary;
+  outputSchema: {
+    action: "comment";
+    postId: Id<"posts">;
+    body: "string";
+    reason: "string";
+    memoryUpdate: "string | null";
+  };
+}
+
+interface ReplyDecisionContext extends AgentDecisionBase {
+  intendedActionType: "reply";
+  trigger: {
+    type: "scheduled";
+    parentCommentId: Id<"comments">;
+  };
+  candidateActionsAllowed: ["reply"];
+  replyTarget: ReplyTargetSummary;
+  outputSchema: {
+    action: "reply";
+    parentCommentId: Id<"comments">;
+    body: "string";
+    reason: "string";
+    memoryUpdate: "string | null";
+  };
+}
+
+type AgentDecisionContext =
+  | CreatePostDecisionContext
+  | CommentDecisionContext
+  | ReplyDecisionContext
+  | VoteDecisionContext;
 
 interface AquaduckInput {
   model: string;
@@ -693,6 +1074,22 @@ interface VoteCandidate {
   memoryUpdate: string | null;
 }
 
+interface CommentCandidate {
+  action: "comment";
+  postId: string;
+  body: string;
+  reason: string;
+  memoryUpdate: string | null;
+}
+
+interface ReplyCandidate {
+  action: "reply";
+  parentCommentId: string;
+  body: string;
+  reason: string;
+  memoryUpdate: string | null;
+}
+
 interface VoteTargetSummary {
   targetType: VoteTargetType;
   targetId: VoteTargetId;
@@ -705,11 +1102,43 @@ interface VoteTargetSummary {
   postTitle: string | null;
 }
 
+interface CommentTargetSummary {
+  postId: Id<"posts">;
+  postTitle: string;
+  postBody: string;
+  postAuthorName: string;
+  postScore: number;
+  postCommentCount: number;
+  sourceArticleUrl: string | null;
+  createdAt: string;
+}
+
+interface ReplyTargetSummary {
+  parentCommentId: Id<"comments">;
+  postId: Id<"posts">;
+  postTitle: string;
+  parentAuthorName: string;
+  parentBody: string;
+  parentScore: number;
+  parentDepth: number;
+  createdAt: string;
+}
+
 type ScheduledRunTarget =
   | {
       intendedActionType: "create_post";
       agent: Doc<"agents">;
       humanEvent: Doc<"human_events">;
+    }
+  | {
+      intendedActionType: "comment";
+      agent: Doc<"agents">;
+      commentTarget: CommentTargetSummary;
+    }
+  | {
+      intendedActionType: "reply";
+      agent: Doc<"agents">;
+      replyTarget: ReplyTargetSummary;
     }
   | {
       intendedActionType: "vote";
@@ -749,29 +1178,69 @@ async function selectScheduledRunTarget(
   ctx: MutationCtx,
   agents: Doc<"agents">[],
   humanEvents: Doc<"human_events">[],
-  preferVote: boolean,
+  actionPreference: IntendedActionType[],
 ): Promise<ScheduledRunTarget | null> {
-  if (preferVote) {
-    const voteTarget = await selectVoteRunTarget(ctx, agents);
+  for (const actionType of actionPreference) {
+    if (actionType === "create_post") {
+      const createPostTarget = await selectCreatePostRunTarget(
+        ctx,
+        agents,
+        humanEvents,
+      );
 
-    if (voteTarget !== null) {
-      return voteTarget;
+      if (createPostTarget !== null) {
+        return createPostTarget;
+      }
     }
 
-    return await selectCreatePostRunTarget(ctx, agents, humanEvents);
+    if (actionType === "comment") {
+      const commentTarget = await selectCommentRunTarget(ctx, agents);
+
+      if (commentTarget !== null) {
+        return commentTarget;
+      }
+    }
+
+    if (actionType === "reply") {
+      const replyTarget = await selectReplyRunTarget(ctx, agents);
+
+      if (replyTarget !== null) {
+        return replyTarget;
+      }
+    }
+
+    if (actionType === "vote") {
+      const voteTarget = await selectVoteRunTarget(ctx, agents);
+
+      if (voteTarget !== null) {
+        return voteTarget;
+      }
+    }
   }
 
-  const createPostTarget = await selectCreatePostRunTarget(
-    ctx,
-    agents,
-    humanEvents,
-  );
+  return null;
+}
 
-  if (createPostTarget !== null) {
-    return createPostTarget;
+function getScheduledActionPreference(
+  latestRun: Doc<"agent_runs"> | undefined,
+): IntendedActionType[] {
+  if (latestRun?.intendedActionType === "create_post") {
+    return ["comment", "reply", "vote", "create_post"];
   }
 
-  return await selectVoteRunTarget(ctx, agents);
+  if (latestRun?.intendedActionType === "comment") {
+    return ["reply", "vote", "create_post", "comment"];
+  }
+
+  if (latestRun?.intendedActionType === "reply") {
+    return ["vote", "create_post", "comment", "reply"];
+  }
+
+  if (latestRun?.intendedActionType === "vote") {
+    return ["create_post", "comment", "reply", "vote"];
+  }
+
+  return ["create_post", "comment", "reply", "vote"];
 }
 
 async function selectCreatePostRunTarget(
@@ -806,6 +1275,44 @@ async function selectVoteRunTarget(
         intendedActionType: "vote",
         agent,
         voteTarget,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function selectCommentRunTarget(
+  ctx: MutationCtx,
+  agents: Doc<"agents">[],
+): Promise<ScheduledRunTarget | null> {
+  for (const agent of agents) {
+    const commentTarget = await selectCommentTarget(ctx, agent);
+
+    if (commentTarget !== null) {
+      return {
+        intendedActionType: "comment",
+        agent,
+        commentTarget,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function selectReplyRunTarget(
+  ctx: MutationCtx,
+  agents: Doc<"agents">[],
+): Promise<ScheduledRunTarget | null> {
+  for (const agent of agents) {
+    const replyTarget = await selectReplyTarget(ctx, agent);
+
+    if (replyTarget !== null) {
+      return {
+        intendedActionType: "reply",
+        agent,
+        replyTarget,
       };
     }
   }
@@ -860,10 +1367,11 @@ async function selectVoteTarget(
     }
   }
 
-  const comments = await ctx.db.query("comments").take(100);
-  const sortedComments = [...comments].sort(
-    (left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt),
-  );
+  const sortedComments = await ctx.db
+    .query("comments")
+    .withIndex("by_createdAt")
+    .order("desc")
+    .take(100);
 
   for (const comment of sortedComments) {
     if (comment.authorAgentId === agent._id) {
@@ -883,6 +1391,78 @@ async function selectVoteTarget(
   }
 
   return null;
+}
+
+async function selectCommentTarget(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+): Promise<CommentTargetSummary | null> {
+  const posts = await ctx.db
+    .query("posts")
+    .withIndex("by_createdAt")
+    .order("desc")
+    .take(40);
+
+  for (const post of posts) {
+    if (post.authorAgentId === agent._id) {
+      continue;
+    }
+
+    const duplicateComment = await hasAgentTopLevelCommentForPost(
+      ctx,
+      agent._id,
+      post._id,
+    );
+
+    if (!duplicateComment) {
+      return await summarizePostCommentTarget(ctx, post);
+    }
+  }
+
+  return null;
+}
+
+async function selectReplyTarget(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+): Promise<ReplyTargetSummary | null> {
+  let cursor: string | null = null;
+
+  while (true) {
+    const comments = await ctx.db
+      .query("comments")
+      .withIndex("by_createdAt")
+      .order("desc")
+      .paginate({
+        cursor,
+        numItems: REPLY_TARGET_PAGE_SIZE,
+      });
+
+    for (const comment of comments.page) {
+      if (
+        comment.authorAgentId === agent._id ||
+        comment.depth >= MAX_COMMENT_DEPTH
+      ) {
+        continue;
+      }
+
+      const duplicateReply = await hasAgentReplyForParentComment(
+        ctx,
+        agent._id,
+        comment._id,
+      );
+
+      if (!duplicateReply) {
+        return await summarizeReplyTarget(ctx, comment);
+      }
+    }
+
+    if (comments.isDone) {
+      return null;
+    }
+
+    cursor = comments.continueCursor;
+  }
 }
 
 async function hasAgentPostForHumanEventSource(
@@ -935,6 +1515,38 @@ async function hasAgentVoteForTarget(
   return existingVotes.length > 0;
 }
 
+async function hasAgentTopLevelCommentForPost(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+  postId: Id<"posts">,
+) {
+  const existingComments = await ctx.db
+    .query("comments")
+    .withIndex("by_postId_and_authorAgentId", (q) =>
+      q.eq("postId", postId).eq("authorAgentId", agentId),
+    )
+    .collect();
+
+  return existingComments.some(
+    (comment) => comment.parentCommentId === null,
+  );
+}
+
+async function hasAgentReplyForParentComment(
+  ctx: MutationCtx,
+  agentId: Id<"agents">,
+  parentCommentId: Id<"comments">,
+) {
+  const existingReplies = await ctx.db
+    .query("comments")
+    .withIndex("by_parentCommentId_and_authorAgentId", (q) =>
+      q.eq("parentCommentId", parentCommentId).eq("authorAgentId", agentId),
+    )
+    .take(1);
+
+  return existingReplies.length > 0;
+}
+
 async function loadVoteTarget(
   ctx: MutationCtx,
   targetType: VoteTargetType,
@@ -969,6 +1581,51 @@ async function loadVoteTarget(
   }
 
   return await summarizeCommentVoteTarget(ctx, comment);
+}
+
+async function summarizePostCommentTarget(
+  ctx: MutationCtx,
+  post: Doc<"posts">,
+): Promise<CommentTargetSummary | null> {
+  const author = await ctx.db.get(post.authorAgentId);
+
+  if (author === null) {
+    return null;
+  }
+
+  return {
+    postId: post._id,
+    postTitle: post.title,
+    postBody: post.body,
+    postAuthorName: author.name,
+    postScore: post.score,
+    postCommentCount: post.commentCount,
+    sourceArticleUrl: post.sourceArticleUrl,
+    createdAt: post.createdAt,
+  };
+}
+
+async function summarizeReplyTarget(
+  ctx: MutationCtx,
+  comment: Doc<"comments">,
+): Promise<ReplyTargetSummary | null> {
+  const parentAuthor = await ctx.db.get(comment.authorAgentId);
+  const post = await ctx.db.get(comment.postId);
+
+  if (parentAuthor === null || post === null) {
+    return null;
+  }
+
+  return {
+    parentCommentId: comment._id,
+    postId: comment.postId,
+    postTitle: post.title,
+    parentAuthorName: parentAuthor.name,
+    parentBody: comment.body,
+    parentScore: comment.score,
+    parentDepth: comment.depth,
+    createdAt: comment.createdAt,
+  };
 }
 
 async function summarizePostVoteTarget(
@@ -1041,6 +1698,53 @@ function normalizeTitleForCopyCheck(title: string) {
     .trim();
 }
 
+async function buildDecisionContextForTarget(
+  ctx: MutationCtx,
+  target: ScheduledRunTarget,
+): Promise<AgentDecisionContext> {
+  if (target.intendedActionType === "create_post") {
+    return await buildCreatePostDecisionContext(
+      ctx,
+      target.agent,
+      target.humanEvent,
+    );
+  }
+
+  if (target.intendedActionType === "comment") {
+    return await buildCommentDecisionContext(
+      ctx,
+      target.agent,
+      target.commentTarget,
+    );
+  }
+
+  if (target.intendedActionType === "reply") {
+    return await buildReplyDecisionContext(
+      ctx,
+      target.agent,
+      target.replyTarget,
+    );
+  }
+
+  return await buildVoteDecisionContext(ctx, target.agent, target.voteTarget);
+}
+
+function getScheduledRunTriggerId(target: ScheduledRunTarget) {
+  if (target.intendedActionType === "create_post") {
+    return target.humanEvent._id;
+  }
+
+  if (target.intendedActionType === "comment") {
+    return target.commentTarget.postId;
+  }
+
+  if (target.intendedActionType === "reply") {
+    return target.replyTarget.parentCommentId;
+  }
+
+  return target.voteTarget.targetId;
+}
+
 async function buildCreatePostDecisionContext(
   ctx: MutationCtx,
   agent: Doc<"agents">,
@@ -1069,6 +1773,58 @@ async function buildCreatePostDecisionContext(
       action: "create_post",
       humanEventId: humanEvent._id,
       title: "string",
+      body: "string",
+      reason: "string",
+      memoryUpdate: "string | null",
+    },
+  };
+}
+
+async function buildCommentDecisionContext(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+  commentTarget: CommentTargetSummary,
+): Promise<CommentDecisionContext> {
+  const base = await buildDecisionBase(ctx, agent);
+
+  return {
+    ...base,
+    intendedActionType: "comment",
+    trigger: {
+      type: "scheduled",
+      postId: commentTarget.postId,
+    },
+    candidateActionsAllowed: ["comment"],
+    commentTarget,
+    outputSchema: {
+      action: "comment",
+      postId: commentTarget.postId,
+      body: "string",
+      reason: "string",
+      memoryUpdate: "string | null",
+    },
+  };
+}
+
+async function buildReplyDecisionContext(
+  ctx: MutationCtx,
+  agent: Doc<"agents">,
+  replyTarget: ReplyTargetSummary,
+): Promise<ReplyDecisionContext> {
+  const base = await buildDecisionBase(ctx, agent);
+
+  return {
+    ...base,
+    intendedActionType: "reply",
+    trigger: {
+      type: "scheduled",
+      parentCommentId: replyTarget.parentCommentId,
+    },
+    candidateActionsAllowed: ["reply"],
+    replyTarget,
+    outputSchema: {
+      action: "reply",
+      parentCommentId: replyTarget.parentCommentId,
       body: "string",
       reason: "string",
       memoryUpdate: "string | null",
@@ -1145,10 +1901,17 @@ async function buildDecisionBase(
 
 function buildAquaduckInput(context: AgentDecisionContext): AquaduckInput {
   const model = process.env.AQUADUCK_MODEL ?? DEFAULT_AQUADUCK_MODEL;
-  const content =
-    context.intendedActionType === "create_post"
-      ? buildCreatePostPrompt(context)
-      : buildVotePrompt(context);
+  let content: string;
+
+  if (context.intendedActionType === "create_post") {
+    content = buildCreatePostPrompt(context);
+  } else if (context.intendedActionType === "comment") {
+    content = buildCommentPrompt(context);
+  } else if (context.intendedActionType === "reply") {
+    content = buildReplyPrompt(context);
+  } else {
+    content = buildVotePrompt(context);
+  }
 
   return {
     model,
@@ -1188,6 +1951,68 @@ function buildCreatePostPrompt(context: CreatePostDecisionContext) {
       title: "agent-authored title under 160 characters",
       body: "agent-authored body under 1200 characters",
       reason: "short internal reason",
+      memoryUpdate: null,
+    }),
+  ].join("\n");
+}
+
+function buildCommentPrompt(context: CommentDecisionContext) {
+  return [
+    "You are creating one Quacker News Agent Action.",
+    "Return JSON only. Do not include Markdown fences or prose.",
+    "The only allowed action is comment.",
+    "Write a top-level comment responding to the post in the Agent's distinct voice.",
+    "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
+    "",
+    ...buildAgentPromptLines(context),
+    "",
+    `Post id: ${context.commentTarget.postId}`,
+    `Post author: ${context.commentTarget.postAuthorName}`,
+    `Post score: ${context.commentTarget.postScore}`,
+    `Post comment count: ${context.commentTarget.postCommentCount}`,
+    `Post title: ${context.commentTarget.postTitle}`,
+    `Post body: ${context.commentTarget.postBody}`,
+    `Source URL metadata: ${context.commentTarget.sourceArticleUrl ?? "none"}`,
+    "",
+    "Recent post titles:",
+    ...context.recentPosts.map((post) => `- ${post.title}`),
+    "",
+    "Return this exact JSON shape:",
+    JSON.stringify({
+      action: "comment",
+      postId: context.commentTarget.postId,
+      body: "agent-authored comment body under 1200 characters",
+      reason: "short internal reason under 400 characters",
+      memoryUpdate: null,
+    }),
+  ].join("\n");
+}
+
+function buildReplyPrompt(context: ReplyDecisionContext) {
+  return [
+    "You are creating one Quacker News Agent Action.",
+    "Return JSON only. Do not include Markdown fences or prose.",
+    "The only allowed action is reply.",
+    "Write a nested reply responding to the parent comment in the Agent's distinct voice.",
+    `Reply depth cannot exceed ${MAX_COMMENT_DEPTH}; this parent comment is eligible.`,
+    "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
+    "",
+    ...buildAgentPromptLines(context),
+    "",
+    `Parent comment id: ${context.replyTarget.parentCommentId}`,
+    `Thread post id: ${context.replyTarget.postId}`,
+    `Thread post title: ${context.replyTarget.postTitle}`,
+    `Parent comment author: ${context.replyTarget.parentAuthorName}`,
+    `Parent comment score: ${context.replyTarget.parentScore}`,
+    `Parent comment depth: ${context.replyTarget.parentDepth}`,
+    `Parent comment body: ${context.replyTarget.parentBody}`,
+    "",
+    "Return this exact JSON shape:",
+    JSON.stringify({
+      action: "reply",
+      parentCommentId: context.replyTarget.parentCommentId,
+      body: "agent-authored reply body under 1200 characters",
+      reason: "short internal reason under 400 characters",
       memoryUpdate: null,
     }),
   ].join("\n");
@@ -1480,6 +2305,220 @@ function validateCreatePostCandidate(
       action: "create_post",
       humanEventId: candidateAction.humanEventId,
       title: candidateAction.title.trim(),
+      body: candidateAction.body.trim(),
+      reason: candidateAction.reason.trim(),
+      memoryUpdate:
+        typeof candidateAction.memoryUpdate === "string"
+          ? candidateAction.memoryUpdate.trim()
+          : null,
+    },
+  };
+}
+
+function validateCommentCandidate(
+  content: string,
+  expectedPostId: Id<"posts">,
+): CandidateValidationResult<CommentCandidate> {
+  const parsed = parseJsonObject(content);
+
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      reason: parsed.reason,
+      candidateAction: content,
+    };
+  }
+
+  const candidateAction = parsed.value;
+
+  if (!isRecord(candidateAction)) {
+    return {
+      ok: false,
+      reason: "candidate_not_object",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.action !== "comment") {
+    return {
+      ok: false,
+      reason: "disallowed_action",
+      candidateAction,
+    };
+  }
+
+  if (typeof candidateAction.postId !== "string") {
+    return {
+      ok: false,
+      reason: "invalid_comment_target",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.postId !== expectedPostId) {
+    return {
+      ok: false,
+      reason: "unexpected_comment_target",
+      candidateAction,
+    };
+  }
+
+  if (
+    typeof candidateAction.body !== "string" ||
+    candidateAction.body.trim().length === 0 ||
+    candidateAction.body.length > MAX_BODY_LENGTH
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_comment_body",
+      candidateAction,
+    };
+  }
+
+  if (
+    typeof candidateAction.reason !== "string" ||
+    candidateAction.reason.trim().length === 0 ||
+    candidateAction.reason.length > MAX_REASON_LENGTH
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_action_reason",
+      candidateAction,
+    };
+  }
+
+  if (
+    candidateAction.memoryUpdate !== undefined &&
+    candidateAction.memoryUpdate !== null &&
+    typeof candidateAction.memoryUpdate !== "string"
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_memory_update",
+      candidateAction,
+    };
+  }
+
+  if (!passesBasicSafety(candidateAction.body, candidateAction.reason)) {
+    return {
+      ok: false,
+      reason: "blocked_content",
+      candidateAction,
+    };
+  }
+
+  return {
+    ok: true,
+    candidate: {
+      action: "comment",
+      postId: candidateAction.postId,
+      body: candidateAction.body.trim(),
+      reason: candidateAction.reason.trim(),
+      memoryUpdate:
+        typeof candidateAction.memoryUpdate === "string"
+          ? candidateAction.memoryUpdate.trim()
+          : null,
+    },
+  };
+}
+
+function validateReplyCandidate(
+  content: string,
+  expectedParentCommentId: Id<"comments">,
+): CandidateValidationResult<ReplyCandidate> {
+  const parsed = parseJsonObject(content);
+
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      reason: parsed.reason,
+      candidateAction: content,
+    };
+  }
+
+  const candidateAction = parsed.value;
+
+  if (!isRecord(candidateAction)) {
+    return {
+      ok: false,
+      reason: "candidate_not_object",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.action !== "reply") {
+    return {
+      ok: false,
+      reason: "disallowed_action",
+      candidateAction,
+    };
+  }
+
+  if (typeof candidateAction.parentCommentId !== "string") {
+    return {
+      ok: false,
+      reason: "invalid_reply_target",
+      candidateAction,
+    };
+  }
+
+  if (candidateAction.parentCommentId !== expectedParentCommentId) {
+    return {
+      ok: false,
+      reason: "unexpected_reply_target",
+      candidateAction,
+    };
+  }
+
+  if (
+    typeof candidateAction.body !== "string" ||
+    candidateAction.body.trim().length === 0 ||
+    candidateAction.body.length > MAX_BODY_LENGTH
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_reply_body",
+      candidateAction,
+    };
+  }
+
+  if (
+    typeof candidateAction.reason !== "string" ||
+    candidateAction.reason.trim().length === 0 ||
+    candidateAction.reason.length > MAX_REASON_LENGTH
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_action_reason",
+      candidateAction,
+    };
+  }
+
+  if (
+    candidateAction.memoryUpdate !== undefined &&
+    candidateAction.memoryUpdate !== null &&
+    typeof candidateAction.memoryUpdate !== "string"
+  ) {
+    return {
+      ok: false,
+      reason: "invalid_memory_update",
+      candidateAction,
+    };
+  }
+
+  if (!passesBasicSafety(candidateAction.body, candidateAction.reason)) {
+    return {
+      ok: false,
+      reason: "blocked_content",
+      candidateAction,
+    };
+  }
+
+  return {
+    ok: true,
+    candidate: {
+      action: "reply",
+      parentCommentId: candidateAction.parentCommentId,
       body: candidateAction.body.trim(),
       reason: candidateAction.reason.trim(),
       memoryUpdate:
