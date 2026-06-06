@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { internalAction, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Doc, Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import type { ActionCtx, MutationCtx } from "./_generated/server";
 
 const AQUADUCK_CHAT_COMPLETIONS_URL =
   "https://api.aquaduck.ai/v1/chat/completions";
@@ -21,10 +21,14 @@ const MAX_MEMORY_UPDATE_LENGTH = 500;
 const MAX_MEMORY_SUMMARY_LENGTH = 700;
 const MAX_MEMORY_EVENT_SUMMARY_LENGTH = 500;
 const MAX_FOCUS_ITEM_LENGTH = 80;
+const DEFAULT_AGENT_WAKE_INTERVAL_HOURS = 6;
+const MIN_AGENT_WAKE_INTERVAL_HOURS = 1;
+const MAX_AGENT_WAKE_INTERVAL_HOURS = 24;
 
 declare const process: {
   env: {
     AGENT_RUNS_ENABLED?: string;
+    AGENT_WAKE_INTERVAL_HOURS?: string;
     AQUADUCK_API_KEY?: string;
     AQUADUCK_MODEL?: string;
   };
@@ -37,23 +41,63 @@ export const scheduledTick = internalAction({
       return { kind: "disabled" };
     }
 
-    const runResult: CreateScheduledRunResult = await ctx.runMutation(
-      internal.agentRuns.createScheduledRun,
-      {},
+    const intervalHours = parseIntervalHours(
+      process.env.AGENT_WAKE_INTERVAL_HOURS,
+      DEFAULT_AGENT_WAKE_INTERVAL_HOURS,
+      MIN_AGENT_WAKE_INTERVAL_HOURS,
+      MAX_AGENT_WAKE_INTERVAL_HOURS,
     );
-
-    if (runResult.kind === "skipped") {
-      return runResult;
-    }
-
-    const aquaduckInput = buildAquaduckInput(runResult.context);
-    await ctx.runMutation(internal.agentRuns.markRunRunning, {
-      runId: runResult.runId,
-      aquaduckInput,
-      startedAt: new Date().toISOString(),
+    const claim = await ctx.runMutation(internal.scheduler.claimDueWork, {
+      key: "agent_wake",
+      intervalHours,
+      now: new Date().toISOString(),
     });
 
-    const apiKey = process.env.AQUADUCK_API_KEY;
+    if (claim.kind === "skipped") {
+      return claim;
+    }
+
+    let result: ScheduledTickResult = {
+      kind: "failed",
+      error: "scheduler_error",
+    };
+
+    try {
+      result = await runScheduledAgentRun(ctx);
+      return result;
+    } finally {
+      await ctx.runMutation(internal.scheduler.completeWork, {
+        key: "agent_wake",
+        intervalHours,
+        result: summarizeScheduledTickResult(result),
+        completedAt: new Date().toISOString(),
+        consumeInterval: shouldConsumeAgentWakeInterval(result),
+        previousLastStartedAt: claim.previousLastStartedAt,
+      });
+    }
+  },
+});
+
+async function runScheduledAgentRun(
+  ctx: ActionCtx,
+): Promise<ScheduledTickResult> {
+  const runResult: CreateScheduledRunResult = await ctx.runMutation(
+    internal.agentRuns.createScheduledRun,
+    {},
+  );
+
+  if (runResult.kind === "skipped") {
+    return runResult;
+  }
+
+  const aquaduckInput = buildAquaduckInput(runResult.context);
+  await ctx.runMutation(internal.agentRuns.markRunRunning, {
+    runId: runResult.runId,
+    aquaduckInput,
+    startedAt: new Date().toISOString(),
+  });
+
+  const apiKey = process.env.AQUADUCK_API_KEY;
 
     if (!apiKey) {
       await ctx.runMutation(internal.agentRuns.completeNoopRun, {
@@ -227,8 +271,7 @@ export const scheduledTick = internalAction({
       });
       return { kind: "failed", error: message };
     }
-  },
-});
+}
 
 export const createScheduledRun = internalMutation({
   args: {},
@@ -3184,4 +3227,43 @@ function truncate(value: string, length: number) {
   }
 
   return `${value.slice(0, length)}...`;
+}
+
+function parseIntervalHours(
+  rawValue: string | undefined,
+  defaultValue: number,
+  minValue: number,
+  maxValue: number,
+) {
+  if (rawValue === undefined || rawValue.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const parsed = Number(rawValue);
+
+  if (!Number.isFinite(parsed)) {
+    return defaultValue;
+  }
+
+  return Math.min(maxValue, Math.max(minValue, Math.floor(parsed)));
+}
+
+function summarizeScheduledTickResult(result: ScheduledTickResult) {
+  if (result.kind === "skipped") {
+    return `skipped:${result.reason}`;
+  }
+
+  if (result.kind === "noop") {
+    return `noop:${result.reason}`;
+  }
+
+  if (result.kind === "failed") {
+    return `failed:${result.error}`;
+  }
+
+  return result.kind;
+}
+
+function shouldConsumeAgentWakeInterval(result: ScheduledTickResult) {
+  return result.kind !== "skipped" || result.reason !== "active_run_exists";
 }

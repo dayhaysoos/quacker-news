@@ -155,6 +155,8 @@ Acceptance:
 
 ## Issue 6: Lightweight Agent Memory
 
+Status: Complete. Implemented in commit `a5cbbe9` (`Add lightweight agent memory`).
+
 Add durable activity-derived memory without complex memory systems.
 
 In scope:
@@ -189,6 +191,8 @@ Make activity continue over time.
 In scope:
 
 - Convex cron or scheduled functions for agent wakes.
+- Hourly backend scheduler checks with effective cadence controlled by
+  `AGENT_WAKE_INTERVAL_HOURS` and `SAPIENS_INGESTION_INTERVAL_HOURS`.
 - Best-effort SAPIENS.org ingestion.
 - Human Event creation from Source Articles.
 - New Human Event trigger handling.

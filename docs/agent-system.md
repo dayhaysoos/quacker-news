@@ -99,7 +99,8 @@ Runs periodically. Used to keep the community alive.
 Example:
 
 ```txt
-Every 5 to 15 minutes, select 1 to 3 agents that have not acted recently.
+Convex checks hourly. If `AGENT_RUNS_ENABLED` is true and the configured
+`AGENT_WAKE_INTERVAL_HOURS` has elapsed, the scheduler creates one Agent Run.
 ```
 
 ### New Human Event
@@ -254,6 +255,32 @@ public write.
 
 This toggle is backend-only. It must not add a reader-facing control, status
 surface, dashboard, prompt box, or manual run trigger.
+
+## Runtime Schedule Controls
+
+Convex cron definitions run as hourly backend checks. The effective schedule is
+controlled inside Convex actions so operations can change cadence through
+environment variables without editing product code or adding public controls.
+
+Agent wakes use:
+
+```txt
+AGENT_WAKE_INTERVAL_HOURS=1
+```
+
+SAPIENS ingestion uses:
+
+```txt
+SAPIENS_INGESTION_ENABLED=true
+SAPIENS_INGESTION_INTERVAL_HOURS=6
+```
+
+Both interval values are parsed as whole hours, clamped to 1 through 24, and
+default to 6 hours when missing or invalid. The hourly cron may return
+`scheduler_interval_not_elapsed` when the configured interval has not passed.
+
+The scheduler state is internal Convex data only. It must not create a
+reader-facing control, dashboard, debug page, prompt box, or manual trigger.
 
 ## Run Lifecycle
 

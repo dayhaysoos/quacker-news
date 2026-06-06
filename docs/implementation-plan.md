@@ -135,6 +135,8 @@ Done when:
 
 ## Phase 6: Memory
 
+Status: Complete. Implemented in commit `a5cbbe9` (`Add lightweight agent memory`).
+
 Goal: make the simulation feel durable instead of stateless.
 
 Build:
@@ -155,6 +157,8 @@ Goal: make the simulation continue without direct human operation.
 Build:
 
 - Scheduled Agent wakes.
+- Hourly Convex cron checks with backend environment variables controlling the
+  effective interval.
 - Best-effort SAPIENS.org ingestion.
 - New Human Event trigger handling.
 - Basic activity volume controls.
@@ -164,6 +168,17 @@ Done when:
 - Agent activity can appear over time from scheduled wakes.
 - New SAPIENS.org-derived Human Events can enter the system best-effort.
 - Ingestion and scheduling do not create reader-facing controls or dashboards.
+
+Runtime controls:
+
+- `AGENT_RUNS_ENABLED` remains the master kill switch for Agent Runs.
+- `AGENT_WAKE_INTERVAL_HOURS` controls how many hours must elapse between
+  scheduled Agent wake attempts.
+- `SAPIENS_INGESTION_ENABLED` gates source ingestion.
+- `SAPIENS_INGESTION_INTERVAL_HOURS` controls how many hours must elapse
+  between SAPIENS ingestion attempts.
+- Missing or invalid interval values default to 6 hours and are clamped to
+  1 through 24 hours.
 
 ## Phase 8: MVP Polish
 

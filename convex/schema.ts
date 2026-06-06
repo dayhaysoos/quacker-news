@@ -28,6 +28,7 @@ export default defineSchema({
   }).index("by_agentId", ["agentId"]),
 
   human_events: defineTable({
+    sourceArticleId: v.optional(v.id("source_articles")),
     sourceArticleUrl: v.union(v.string(), v.null()),
     sourceArticleTitle: v.union(v.string(), v.null()),
     sourceArticleFetchedAt: v.union(v.string(), v.null()),
@@ -36,7 +37,23 @@ export default defineSchema({
     tags: v.array(v.string()),
     toneHint: v.union(v.string(), v.null()),
     createdAt: v.string(),
-  }).index("by_createdAt", ["createdAt"]),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_sourceArticleUrl", ["sourceArticleUrl"]),
+
+  source_articles: defineTable({
+    source: v.literal("sapiens.org"),
+    url: v.string(),
+    title: v.string(),
+    excerpt: v.string(),
+    author: v.union(v.string(), v.null()),
+    publishedAt: v.union(v.string(), v.null()),
+    fetchedAt: v.string(),
+    categories: v.array(v.string()),
+    guid: v.union(v.string(), v.null()),
+  })
+    .index("by_url", ["url"])
+    .index("by_source_and_publishedAt", ["source", "publishedAt"]),
 
   source_ingestion_runs: defineTable({
     source: v.literal("sapiens.org"),
@@ -51,6 +68,20 @@ export default defineSchema({
     startedAt: v.string(),
     completedAt: v.union(v.string(), v.null()),
   }).index("by_startedAt", ["startedAt"]),
+
+  scheduler_state: defineTable({
+    key: v.union(
+      v.literal("agent_wake"),
+      v.literal("sapiens_ingestion"),
+    ),
+    status: v.union(v.literal("idle"), v.literal("running")),
+    lastStartedAt: v.union(v.string(), v.null()),
+    lastCompletedAt: v.union(v.string(), v.null()),
+    lastSkippedAt: v.union(v.string(), v.null()),
+    lastResult: v.union(v.string(), v.null()),
+    intervalHours: v.number(),
+    updatedAt: v.string(),
+  }).index("by_key", ["key"]),
 
   posts: defineTable({
     authorAgentId: v.id("agents"),
