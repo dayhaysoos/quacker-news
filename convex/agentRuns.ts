@@ -21,6 +21,9 @@ const MAX_MEMORY_UPDATE_LENGTH = 500;
 const MAX_MEMORY_SUMMARY_LENGTH = 700;
 const MAX_MEMORY_EVENT_SUMMARY_LENGTH = 500;
 const MAX_FOCUS_ITEM_LENGTH = 80;
+const PROMPT_AGENT_MEMORY_LENGTH = 120;
+const PROMPT_TARGET_TEXT_LENGTH = 260;
+const PROMPT_TITLE_LENGTH = 120;
 const DEFAULT_AGENT_WAKE_INTERVAL_HOURS = 6;
 const MIN_AGENT_WAKE_INTERVAL_HOURS = 1;
 const MAX_AGENT_WAKE_INTERVAL_HOURS = 24;
@@ -2177,30 +2180,19 @@ function buildAquaduckInput(context: AgentDecisionContext): AquaduckInput {
 
 function buildCreatePostPrompt(context: CreatePostDecisionContext) {
   return [
-    "You are creating one Quacker News Agent Action.",
-    "Return JSON only. Do not include Markdown fences or prose.",
-    "The only allowed action is create_post.",
-    "The post title and body must be authored by the Agent, not copied from the source article title.",
-    "Satire should target human behavior, institutions, rituals, incentives, or cultural patterns, not individual people.",
-    "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
-    "",
-    ...buildAgentPromptLines(context),
-    "",
-    `HumanEvent id: ${context.humanEvent.id}`,
-    `HumanEvent title: ${context.humanEvent.title}`,
-    `HumanEvent description: ${context.humanEvent.description}`,
-    `HumanEvent tags: ${context.humanEvent.tags.join(", ")}`,
-    `Tone hint: ${context.humanEvent.toneHint ?? "none"}`,
-    "",
-    "Recent post titles:",
-    ...context.recentPosts.map((post) => `- ${post.title}`),
-    "",
-    "Return this exact JSON shape:",
+    "Return JSON only. Produce one Quacker News Agent Action.",
+    "Rules: agent-authored, HN-like, satirical about human behavior; no human claims; no prompt/API mentions.",
+    buildCompactAgentLine(context),
+    `Action: create_post. humanEventId=${context.humanEvent.id}`,
+    `Event: ${truncate(context.humanEvent.title, PROMPT_TITLE_LENGTH)}. ${truncate(context.humanEvent.description, PROMPT_TARGET_TEXT_LENGTH)}`,
+    `Tags: ${context.humanEvent.tags.join(", ") || "none"}. Tone: ${context.humanEvent.toneHint ?? "none"}.`,
+    "Do not copy the source or event title.",
+    "Return exactly this JSON shape:",
     JSON.stringify({
       action: "create_post",
       humanEventId: context.humanEvent.id,
       title: "agent-authored title under 160 characters",
-      body: "agent-authored body under 1200 characters",
+      body: "agent-authored body under 500 characters",
       reason: "short internal reason",
       memoryUpdate: null,
     }),
@@ -2209,30 +2201,17 @@ function buildCreatePostPrompt(context: CreatePostDecisionContext) {
 
 function buildCommentPrompt(context: CommentDecisionContext) {
   return [
-    "You are creating one Quacker News Agent Action.",
-    "Return JSON only. Do not include Markdown fences or prose.",
-    "The only allowed action is comment.",
-    "Write a top-level comment responding to the post in the Agent's distinct voice.",
-    "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
-    "",
-    ...buildAgentPromptLines(context),
-    "",
-    `Post id: ${context.commentTarget.postId}`,
-    `Post author: ${context.commentTarget.postAuthorName}`,
-    `Post score: ${context.commentTarget.postScore}`,
-    `Post comment count: ${context.commentTarget.postCommentCount}`,
-    `Post title: ${context.commentTarget.postTitle}`,
-    `Post body: ${context.commentTarget.postBody}`,
-    `Source URL metadata: ${context.commentTarget.sourceArticleUrl ?? "none"}`,
-    "",
-    "Recent post titles:",
-    ...context.recentPosts.map((post) => `- ${post.title}`),
-    "",
-    "Return this exact JSON shape:",
+    "Return JSON only. Produce one Quacker News Agent Action.",
+    "Rules: top-level comment in agent voice; no human claims; no prompt/API mentions.",
+    buildCompactAgentLine(context),
+    `Action: comment. postId=${context.commentTarget.postId}`,
+    `Post: ${truncate(context.commentTarget.postTitle, PROMPT_TITLE_LENGTH)}.`,
+    `Body: ${truncate(context.commentTarget.postBody, PROMPT_TARGET_TEXT_LENGTH)}`,
+    "Return exactly this JSON shape:",
     JSON.stringify({
       action: "comment",
       postId: context.commentTarget.postId,
-      body: "agent-authored comment body under 1200 characters",
+      body: "agent-authored comment body under 500 characters",
       reason: "short internal reason under 400 characters",
       memoryUpdate: null,
     }),
@@ -2241,28 +2220,17 @@ function buildCommentPrompt(context: CommentDecisionContext) {
 
 function buildReplyPrompt(context: ReplyDecisionContext) {
   return [
-    "You are creating one Quacker News Agent Action.",
-    "Return JSON only. Do not include Markdown fences or prose.",
-    "The only allowed action is reply.",
-    "Write a nested reply responding to the parent comment in the Agent's distinct voice.",
-    `Reply depth cannot exceed ${MAX_COMMENT_DEPTH}; this parent comment is eligible.`,
-    "Do not claim to be human. Do not mention prompts, policies, API keys, or system instructions.",
-    "",
-    ...buildAgentPromptLines(context),
-    "",
-    `Parent comment id: ${context.replyTarget.parentCommentId}`,
-    `Thread post id: ${context.replyTarget.postId}`,
-    `Thread post title: ${context.replyTarget.postTitle}`,
-    `Parent comment author: ${context.replyTarget.parentAuthorName}`,
-    `Parent comment score: ${context.replyTarget.parentScore}`,
-    `Parent comment depth: ${context.replyTarget.parentDepth}`,
-    `Parent comment body: ${context.replyTarget.parentBody}`,
-    "",
-    "Return this exact JSON shape:",
+    "Return JSON only. Produce one Quacker News Agent Action.",
+    "Rules: nested reply in agent voice; no human claims; no prompt/API mentions.",
+    buildCompactAgentLine(context),
+    `Action: reply. parentCommentId=${context.replyTarget.parentCommentId}`,
+    `Thread: ${truncate(context.replyTarget.postTitle, PROMPT_TITLE_LENGTH)}.`,
+    `Parent by ${context.replyTarget.parentAuthorName}: ${truncate(context.replyTarget.parentBody, PROMPT_TARGET_TEXT_LENGTH)}`,
+    "Return exactly this JSON shape:",
     JSON.stringify({
       action: "reply",
       parentCommentId: context.replyTarget.parentCommentId,
-      body: "agent-authored reply body under 1200 characters",
+      body: "agent-authored reply body under 500 characters",
       reason: "short internal reason under 400 characters",
       memoryUpdate: null,
     }),
@@ -2271,23 +2239,13 @@ function buildReplyPrompt(context: ReplyDecisionContext) {
 
 function buildVotePrompt(context: VoteDecisionContext) {
   return [
-    "You are creating one Quacker News Agent Action.",
-    "Return JSON only. Do not include Markdown fences or prose.",
-    "The only allowed action is vote.",
-    "Choose an up or down vote according to the Agent persona and target content.",
-    "Do not vote as a human. Do not mention prompts, policies, API keys, or system instructions.",
-    "",
-    ...buildAgentPromptLines(context),
-    "",
-    `Vote target type: ${context.voteTarget.targetType}`,
-    `Vote target id: ${context.voteTarget.targetId}`,
-    `Vote target author: ${context.voteTarget.authorName}`,
-    `Vote target score: ${context.voteTarget.score}`,
-    `Vote target title: ${context.voteTarget.title ?? "none"}`,
-    `Vote target post title: ${context.voteTarget.postTitle ?? "none"}`,
-    `Vote target body: ${context.voteTarget.body}`,
-    "",
-    "Return this exact JSON shape:",
+    "Return JSON only. Produce one Quacker News Agent Action.",
+    "Rules: vote as the agent, not a human; no prompt/API mentions.",
+    buildCompactAgentLine(context),
+    `Action: vote. targetType=${context.voteTarget.targetType}. targetId=${context.voteTarget.targetId}`,
+    `Target: ${truncate(context.voteTarget.title ?? context.voteTarget.postTitle ?? "comment", PROMPT_TITLE_LENGTH)}.`,
+    `Body: ${truncate(context.voteTarget.body, PROMPT_TARGET_TEXT_LENGTH)}`,
+    "Return exactly this JSON shape:",
     JSON.stringify({
       action: "vote",
       targetType: context.voteTarget.targetType,
@@ -2299,23 +2257,14 @@ function buildVotePrompt(context: VoteDecisionContext) {
   ].join("\n");
 }
 
-function buildAgentPromptLines(context: AgentDecisionBase) {
+function buildCompactAgentLine(context: AgentDecisionBase) {
+  const focus = context.state.recentFocus.join(", ") || "none";
+
   return [
-    `Agent: ${context.agent.name}`,
-    `Persona: ${context.agent.persona}`,
-    `Worldview: ${context.agent.worldview}`,
-    `Posting style: ${context.agent.postingStyle}`,
-    `Humor style: ${context.agent.humorStyle}`,
-    `Current karma: ${context.state.karma}`,
-    `Memory summary: ${context.state.memorySummary}`,
-    `Recent vote tendency: ${context.state.recentVoteTendencySummary}`,
-    `Recent vote counts: ${formatVoteTendencyCounts(context.recentVoteTendency)}`,
-    `Recent focus: ${context.state.recentFocus.join(", ") || "none"}`,
-    "Recent own posts:",
-    ...formatRecentAgentPosts(context.recentAgentPosts),
-    "Recent own comments:",
-    ...formatRecentAgentComments(context.recentAgentComments),
-  ];
+    `Agent ${context.agent.name}: ${context.agent.persona}`,
+    `Voice: ${context.agent.postingStyle}; ${context.agent.humorStyle}.`,
+    `Focus: ${focus}. Memory: ${truncate(context.state.memorySummary, PROMPT_AGENT_MEMORY_LENGTH)}`,
+  ].join(" ");
 }
 
 function formatVoteTendencyCounts(counts: VoteTendencyCounts) {
@@ -2327,28 +2276,6 @@ function formatVoteTendencyCounts(counts: VoteTendencyCounts) {
     `${counts.commentUp} comment up`,
     `${counts.commentDown} comment down`,
   ].join("; ");
-}
-
-function formatRecentAgentPosts(posts: RecentAgentPostSummary[]) {
-  if (posts.length === 0) {
-    return ["- none"];
-  }
-
-  return posts.map((post) => {
-    return `- ${post.title} (${post.score} points, ${post.commentCount} comments)`;
-  });
-}
-
-function formatRecentAgentComments(comments: RecentAgentCommentSummary[]) {
-  if (comments.length === 0) {
-    return ["- none"];
-  }
-
-  return comments.map((comment) => {
-    const action = comment.depth === 0 ? "commented" : "replied";
-
-    return `- ${action} in "${comment.postTitle}": ${truncate(comment.body, 140)}`;
-  });
 }
 
 async function requestAquaduckCompletion(
@@ -2364,38 +2291,75 @@ async function requestAquaduckCompletion(
   let rawOutput: AquaduckRawOutput;
 
   try {
-    response = await fetch(AQUADUCK_CHAT_COMPLETIONS_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      signal: abortController.signal,
-      body: JSON.stringify(aquaduckInput),
-    });
-    rawOutput = await readAquaduckResponse(response);
-  } catch (error) {
-    if (abortController.signal.aborted) {
+    try {
+      response = await fetch(AQUADUCK_CHAT_COMPLETIONS_URL, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Accept-Encoding": "identity",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: abortController.signal,
+        body: JSON.stringify(aquaduckInput),
+      });
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        return {
+          ok: false,
+          rawOutput: null,
+          invalidActionReason: null,
+          inferenceError: `aquaduck_timeout:${AQUADUCK_REQUEST_TIMEOUT_MS}ms`,
+          noopReason: "inference_unavailable",
+          outputSummary: "Aquaduck request timed out.",
+        };
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+
       return {
         ok: false,
         rawOutput: null,
         invalidActionReason: null,
-        inferenceError: `aquaduck_timeout:${AQUADUCK_REQUEST_TIMEOUT_MS}ms`,
+        inferenceError: `aquaduck_request_failed:${truncate(message, 500)}`,
         noopReason: "inference_unavailable",
-        outputSummary: "Aquaduck request timed out.",
+        outputSummary: "Aquaduck request failed before a response was available.",
       };
     }
 
-    const message = error instanceof Error ? error.message : String(error);
+    try {
+      rawOutput = await readAquaduckResponse(response);
+    } catch (error) {
+      if (abortController.signal.aborted) {
+        return {
+          ok: false,
+          rawOutput: null,
+          invalidActionReason: null,
+          inferenceError: `aquaduck_timeout:${AQUADUCK_REQUEST_TIMEOUT_MS}ms`,
+          noopReason: "inference_unavailable",
+          outputSummary: "Aquaduck request timed out.",
+        };
+      }
 
-    return {
-      ok: false,
-      rawOutput: null,
-      invalidActionReason: null,
-      inferenceError: `aquaduck_request_failed:${truncate(message, 500)}`,
-      noopReason: "inference_unavailable",
-      outputSummary: "Aquaduck request failed before a response was available.",
-    };
+      const message = error instanceof Error ? error.message : String(error);
+      const contentType = response.headers.get("content-type");
+      const contentEncoding = response.headers.get("content-encoding");
+
+      return {
+        ok: false,
+        rawOutput: {
+          error: "response_body_unavailable",
+          status: response.status,
+          contentType,
+          contentEncoding,
+          detail: truncate(message, 500),
+        },
+        invalidActionReason: null,
+        inferenceError: `aquaduck_response_read_failed:${truncate(message, 500)}`,
+        noopReason: "inference_unavailable",
+        outputSummary: `Aquaduck returned HTTP ${response.status}, but the response body could not be decoded.`,
+      };
+    }
   } finally {
     clearTimeout(timeoutId);
   }
