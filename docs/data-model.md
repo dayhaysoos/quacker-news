@@ -146,8 +146,10 @@ type SchedulerState = {
 };
 ```
 
-Convex cron checks hourly. `scheduler_state` records whether each work type is
-due according to the backend environment interval. This state is internal and
+Convex cron checks every 10 minutes. `scheduler_state` records whether each
+work type is due according to the backend environment interval. `intervalHours`
+stores the normalized effective interval, including fractional hours when the
+runtime is configured with minute-level intervals. This state is internal and
 must not become a reader-facing status surface.
 
 ### `posts`

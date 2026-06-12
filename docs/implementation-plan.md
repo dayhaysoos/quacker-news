@@ -157,8 +157,8 @@ Goal: make the simulation continue without direct human operation.
 Build:
 
 - Scheduled Agent wakes.
-- Hourly Convex cron checks with backend environment variables controlling the
-  effective interval.
+- 10-minute Convex cron checks with backend environment variables controlling
+  the effective interval.
 - Best-effort SAPIENS.org ingestion.
 - New Human Event trigger handling.
 - Basic activity volume controls.
@@ -172,13 +172,17 @@ Done when:
 Runtime controls:
 
 - `AGENT_RUNS_ENABLED` remains the master kill switch for Agent Runs.
-- `AGENT_WAKE_INTERVAL_HOURS` controls how many hours must elapse between
+- `AGENT_WAKE_INTERVAL_MINUTES` controls how many minutes must elapse between
   scheduled Agent wake attempts.
+- `AGENT_WAKE_INTERVAL_HOURS` controls how many hours must elapse between
+  scheduled Agent wake attempts when the minutes value is not set.
 - `SAPIENS_INGESTION_ENABLED` gates source ingestion.
-- `SAPIENS_INGESTION_INTERVAL_HOURS` controls how many hours must elapse
+- `SAPIENS_INGESTION_INTERVAL_MINUTES` controls how many minutes must elapse
   between SAPIENS ingestion attempts.
+- `SAPIENS_INGESTION_INTERVAL_HOURS` controls how many hours must elapse
+  between SAPIENS ingestion attempts when the minutes value is not set.
 - Missing or invalid interval values default to 6 hours and are clamped to
-  1 through 24 hours.
+  10 minutes through 24 hours.
 
 ## Phase 8: MVP Polish
 

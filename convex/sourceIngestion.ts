@@ -12,13 +12,14 @@ const MAX_TITLE_LENGTH = 180;
 const MAX_EXCERPT_LENGTH = 700;
 const MAX_CATEGORY_COUNT = 8;
 const MAX_CATEGORY_LENGTH = 60;
-const DEFAULT_SAPIENS_INGESTION_INTERVAL_HOURS = 6;
-const MIN_SAPIENS_INGESTION_INTERVAL_HOURS = 1;
-const MAX_SAPIENS_INGESTION_INTERVAL_HOURS = 24;
+const DEFAULT_SAPIENS_INGESTION_INTERVAL_MINUTES = 6 * 60;
+const MIN_SAPIENS_INGESTION_INTERVAL_MINUTES = 10;
+const MAX_SAPIENS_INGESTION_INTERVAL_MINUTES = 24 * 60;
 
 declare const process: {
   env: {
     SAPIENS_INGESTION_ENABLED?: string;
+    SAPIENS_INGESTION_INTERVAL_MINUTES?: string;
     SAPIENS_INGESTION_INTERVAL_HOURS?: string;
     SAPIENS_FEED_URL?: string;
   };
@@ -31,12 +32,14 @@ export const scheduledTick = internalAction({
       return { kind: "disabled" };
     }
 
-    const intervalHours = parseIntervalHours(
+    const intervalMinutes = parseIntervalMinutes(
+      process.env.SAPIENS_INGESTION_INTERVAL_MINUTES,
       process.env.SAPIENS_INGESTION_INTERVAL_HOURS,
-      DEFAULT_SAPIENS_INGESTION_INTERVAL_HOURS,
-      MIN_SAPIENS_INGESTION_INTERVAL_HOURS,
-      MAX_SAPIENS_INGESTION_INTERVAL_HOURS,
+      DEFAULT_SAPIENS_INGESTION_INTERVAL_MINUTES,
+      MIN_SAPIENS_INGESTION_INTERVAL_MINUTES,
+      MAX_SAPIENS_INGESTION_INTERVAL_MINUTES,
     );
+    const intervalHours = intervalMinutes / 60;
     const claim = await ctx.runMutation(internal.scheduler.claimDueWork, {
       key: "sapiens_ingestion",
       intervalHours,
@@ -451,23 +454,44 @@ function decodeHtmlEntities(value: string) {
     .replace(/&#039;/g, "'");
 }
 
-function parseIntervalHours(
-  rawValue: string | undefined,
-  defaultValue: number,
-  minValue: number,
-  maxValue: number,
+function parseIntervalMinutes(
+  rawMinuteValue: string | undefined,
+  rawHourValue: string | undefined,
+  defaultMinutes: number,
+  minMinutes: number,
+  maxMinutes: number,
 ) {
+  const parsedMinutes = parsePositiveInteger(rawMinuteValue);
+
+  if (parsedMinutes !== null) {
+    return clamp(parsedMinutes, minMinutes, maxMinutes);
+  }
+
+  const parsedHours = parsePositiveInteger(rawHourValue);
+
+  if (parsedHours !== null) {
+    return clamp(parsedHours * 60, minMinutes, maxMinutes);
+  }
+
+  return defaultMinutes;
+}
+
+function parsePositiveInteger(rawValue: string | undefined) {
   if (rawValue === undefined || rawValue.trim().length === 0) {
-    return defaultValue;
+    return null;
   }
 
   const parsed = Number(rawValue);
 
-  if (!Number.isFinite(parsed)) {
-    return defaultValue;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
   }
 
-  return Math.min(maxValue, Math.max(minValue, Math.floor(parsed)));
+  return Math.floor(parsed);
+}
+
+function clamp(value: number, minValue: number, maxValue: number) {
+  return Math.min(maxValue, Math.max(minValue, value));
 }
 
 function summarizeSapiensIngestionTickResult(

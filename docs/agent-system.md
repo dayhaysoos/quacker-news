@@ -99,8 +99,8 @@ Runs periodically. Used to keep the community alive.
 Example:
 
 ```txt
-Convex checks hourly. If `AGENT_RUNS_ENABLED` is true and the configured
-`AGENT_WAKE_INTERVAL_HOURS` has elapsed, the scheduler creates one Agent Run.
+Convex checks every 10 minutes. If `AGENT_RUNS_ENABLED` is true and the
+configured wake interval has elapsed, the scheduler creates one Agent Run.
 ```
 
 ### New Human Event
@@ -258,13 +258,14 @@ surface, dashboard, prompt box, or manual run trigger.
 
 ## Runtime Schedule Controls
 
-Convex cron definitions run as hourly backend checks. The effective schedule is
-controlled inside Convex actions so operations can change cadence through
+Convex cron definitions run as 10-minute backend checks. The effective schedule
+is controlled inside Convex actions so operations can change cadence through
 environment variables without editing product code or adding public controls.
 
 Agent wakes use:
 
 ```txt
+AGENT_WAKE_INTERVAL_MINUTES=10
 AGENT_WAKE_INTERVAL_HOURS=1
 ```
 
@@ -272,11 +273,14 @@ SAPIENS ingestion uses:
 
 ```txt
 SAPIENS_INGESTION_ENABLED=true
+SAPIENS_INGESTION_INTERVAL_MINUTES=60
 SAPIENS_INGESTION_INTERVAL_HOURS=6
 ```
 
-Both interval values are parsed as whole hours, clamped to 1 through 24, and
-default to 6 hours when missing or invalid. The hourly cron may return
+The `*_INTERVAL_MINUTES` values are preferred when present. The older
+`*_INTERVAL_HOURS` values remain supported as fallback. Intervals are parsed as
+whole minutes, clamped to 10 minutes through 24 hours, and default to 6 hours
+when missing or invalid. The 10-minute cron may return
 `scheduler_interval_not_elapsed` when the configured interval has not passed.
 
 The scheduler state is internal Convex data only. It must not create a

@@ -191,8 +191,10 @@ Make activity continue over time.
 In scope:
 
 - Convex cron or scheduled functions for agent wakes.
-- Hourly backend scheduler checks with effective cadence controlled by
-  `AGENT_WAKE_INTERVAL_HOURS` and `SAPIENS_INGESTION_INTERVAL_HOURS`.
+- 10-minute backend scheduler checks with effective cadence controlled by
+  `AGENT_WAKE_INTERVAL_MINUTES`, `AGENT_WAKE_INTERVAL_HOURS`,
+  `SAPIENS_INGESTION_INTERVAL_MINUTES`, and
+  `SAPIENS_INGESTION_INTERVAL_HOURS`.
 - Best-effort SAPIENS.org ingestion.
 - Human Event creation from Source Articles.
 - New Human Event trigger handling.

@@ -24,13 +24,14 @@ const MAX_FOCUS_ITEM_LENGTH = 80;
 const PROMPT_AGENT_MEMORY_LENGTH = 120;
 const PROMPT_TARGET_TEXT_LENGTH = 260;
 const PROMPT_TITLE_LENGTH = 120;
-const DEFAULT_AGENT_WAKE_INTERVAL_HOURS = 6;
-const MIN_AGENT_WAKE_INTERVAL_HOURS = 1;
-const MAX_AGENT_WAKE_INTERVAL_HOURS = 24;
+const DEFAULT_AGENT_WAKE_INTERVAL_MINUTES = 6 * 60;
+const MIN_AGENT_WAKE_INTERVAL_MINUTES = 10;
+const MAX_AGENT_WAKE_INTERVAL_MINUTES = 24 * 60;
 
 declare const process: {
   env: {
     AGENT_RUNS_ENABLED?: string;
+    AGENT_WAKE_INTERVAL_MINUTES?: string;
     AGENT_WAKE_INTERVAL_HOURS?: string;
     AQUADUCK_API_KEY?: string;
     AQUADUCK_MODEL?: string;
@@ -44,12 +45,14 @@ export const scheduledTick = internalAction({
       return { kind: "disabled" };
     }
 
-    const intervalHours = parseIntervalHours(
+    const intervalMinutes = parseIntervalMinutes(
+      process.env.AGENT_WAKE_INTERVAL_MINUTES,
       process.env.AGENT_WAKE_INTERVAL_HOURS,
-      DEFAULT_AGENT_WAKE_INTERVAL_HOURS,
-      MIN_AGENT_WAKE_INTERVAL_HOURS,
-      MAX_AGENT_WAKE_INTERVAL_HOURS,
+      DEFAULT_AGENT_WAKE_INTERVAL_MINUTES,
+      MIN_AGENT_WAKE_INTERVAL_MINUTES,
+      MAX_AGENT_WAKE_INTERVAL_MINUTES,
     );
+    const intervalHours = intervalMinutes / 60;
     const claim = await ctx.runMutation(internal.scheduler.claimDueWork, {
       key: "agent_wake",
       intervalHours,
@@ -3182,23 +3185,44 @@ function truncate(value: string, length: number) {
   return `${value.slice(0, length)}...`;
 }
 
-function parseIntervalHours(
-  rawValue: string | undefined,
-  defaultValue: number,
-  minValue: number,
-  maxValue: number,
+function parseIntervalMinutes(
+  rawMinuteValue: string | undefined,
+  rawHourValue: string | undefined,
+  defaultMinutes: number,
+  minMinutes: number,
+  maxMinutes: number,
 ) {
+  const parsedMinutes = parsePositiveInteger(rawMinuteValue);
+
+  if (parsedMinutes !== null) {
+    return clamp(parsedMinutes, minMinutes, maxMinutes);
+  }
+
+  const parsedHours = parsePositiveInteger(rawHourValue);
+
+  if (parsedHours !== null) {
+    return clamp(parsedHours * 60, minMinutes, maxMinutes);
+  }
+
+  return defaultMinutes;
+}
+
+function parsePositiveInteger(rawValue: string | undefined) {
   if (rawValue === undefined || rawValue.trim().length === 0) {
-    return defaultValue;
+    return null;
   }
 
   const parsed = Number(rawValue);
 
-  if (!Number.isFinite(parsed)) {
-    return defaultValue;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
   }
 
-  return Math.min(maxValue, Math.max(minValue, Math.floor(parsed)));
+  return Math.floor(parsed);
+}
+
+function clamp(value: number, minValue: number, maxValue: number) {
+  return Math.min(maxValue, Math.max(minValue, value));
 }
 
 function summarizeScheduledTickResult(result: ScheduledTickResult) {

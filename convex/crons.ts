@@ -5,14 +5,14 @@ const crons = cronJobs();
 
 crons.interval(
   "scheduled agent wake check",
-  { hours: 1 },
+  { minutes: 10 },
   internal.agentRuns.scheduledTick,
   {},
 );
 
 crons.interval(
   "scheduled SAPIENS ingestion check",
-  { hours: 1 },
+  { minutes: 10 },
   internal.sourceIngestion.scheduledTick,
   {},
 );
