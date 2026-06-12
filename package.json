@@ -2,13 +2,16 @@
   "name": "quacker-news",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "concurrently -k -n convex,app -c yellow,cyan \"npm:dev:convex\" \"npm:dev:app\"",
     "dev:app": "vite dev --host 127.0.0.1",
     "dev:convex": "convex dev",
     "seed": "set -a; . ./.env.local; set +a; convex run seed:reset \"{\\\"secret\\\":\\\"$SEED_RESET_SECRET\\\"}\" --push",
     "build": "vite build",
-    "start": "node .output/server/index.mjs",
+    "start": "HOST=0.0.0.0 node .output/server/index.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
