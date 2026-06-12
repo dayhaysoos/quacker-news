@@ -7,12 +7,12 @@ import type { ActionCtx, MutationCtx } from "./_generated/server";
 const AQUADUCK_CHAT_COMPLETIONS_URL =
   "https://api.aquaduck.ai/v1/chat/completions";
 const DEFAULT_AQUADUCK_MODEL = "Qwen3-8B-Q4_K_M";
-const AQUADUCK_REQUEST_TIMEOUT_MS = 15_000;
+const AQUADUCK_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_TITLE_LENGTH = 160;
 const MAX_BODY_LENGTH = 1_200;
 const MAX_REASON_LENGTH = 400;
 const MAX_COMMENT_DEPTH = 5;
-const REPLY_TARGET_PAGE_SIZE = 100;
+const REPLY_TARGET_LIMIT = 100;
 const RECENT_AGENT_POST_MEMORY_LIMIT = 5;
 const RECENT_AGENT_COMMENT_MEMORY_LIMIT = 10;
 const RECENT_AGENT_VOTE_MEMORY_LIMIT = 50;
@@ -1581,43 +1581,32 @@ async function selectReplyTarget(
   ctx: MutationCtx,
   agent: Doc<"agents">,
 ): Promise<ReplyTargetSummary | null> {
-  let cursor: string | null = null;
+  const comments = await ctx.db
+    .query("comments")
+    .withIndex("by_createdAt")
+    .order("desc")
+    .take(REPLY_TARGET_LIMIT);
 
-  while (true) {
-    const comments = await ctx.db
-      .query("comments")
-      .withIndex("by_createdAt")
-      .order("desc")
-      .paginate({
-        cursor,
-        numItems: REPLY_TARGET_PAGE_SIZE,
-      });
-
-    for (const comment of comments.page) {
-      if (
-        comment.authorAgentId === agent._id ||
-        comment.depth >= MAX_COMMENT_DEPTH
-      ) {
-        continue;
-      }
-
-      const duplicateReply = await hasAgentReplyForParentComment(
-        ctx,
-        agent._id,
-        comment._id,
-      );
-
-      if (!duplicateReply) {
-        return await summarizeReplyTarget(ctx, comment);
-      }
+  for (const comment of comments) {
+    if (
+      comment.authorAgentId === agent._id ||
+      comment.depth >= MAX_COMMENT_DEPTH
+    ) {
+      continue;
     }
 
-    if (comments.isDone) {
-      return null;
-    }
+    const duplicateReply = await hasAgentReplyForParentComment(
+      ctx,
+      agent._id,
+      comment._id,
+    );
 
-    cursor = comments.continueCursor;
+    if (!duplicateReply) {
+      return await summarizeReplyTarget(ctx, comment);
+    }
   }
+
+  return null;
 }
 
 async function hasAgentPostForHumanEventSource(
