@@ -8,7 +8,7 @@
     "dev:convex": "convex dev",
     "seed": "set -a; . ./.env.local; set +a; convex run seed:reset \"{\\\"secret\\\":\\\"$SEED_RESET_SECRET\\\"}\" --push",
     "build": "vite build",
-    "start": "vite preview --host 127.0.0.1",
+    "start": "vite preview --host 0.0.0.0 --port ${PORT:-4173}",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
