@@ -8,7 +8,7 @@
     "dev:convex": "convex dev",
     "seed": "set -a; . ./.env.local; set +a; convex run seed:reset \"{\\\"secret\\\":\\\"$SEED_RESET_SECRET\\\"}\" --push",
     "build": "vite build",
-    "start": "vite preview --host 0.0.0.0 --port ${PORT:-4173}",
+    "start": "node .output/server/index.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -26,6 +26,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^10.0.3",
+    "nitro": "npm:nitro-nightly@^3.0.1-20260611-123640-7765bcb7",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.16"
